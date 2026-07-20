@@ -2,6 +2,7 @@ from unittest.mock import patch
 
 import codex_quota
 import codex_quota_window
+import codex_usage
 
 
 def test_proxy_url_requires_http_scheme_and_host():
@@ -17,28 +18,20 @@ def test_proxy_url_requires_http_scheme_and_host():
             raise AssertionError(f"invalid proxy accepted: {invalid}")
 
 
-def test_codex_app_server_receives_proxy_environment():
-    captured = {}
+def test_codex_direct_request_uses_explicit_proxy_handler():
+    proxy_handler = object()
+    with patch.object(
+        codex_usage.urllib.request, "ProxyHandler", return_value=proxy_handler
+    ) as handler, patch.object(
+        codex_usage.urllib.request, "build_opener", return_value="opener"
+    ) as builder:
+        opener = codex_usage._opener("http://127.0.0.1:7890")
 
-    class StopAfterSpawn(Exception):
-        pass
-
-    def fake_popen(*args, **kwargs):
-        captured.update(kwargs["env"])
-        raise StopAfterSpawn
-
-    with patch.object(codex_quota.shutil, "which", return_value="/usr/bin/codex"), patch.object(
-        codex_quota.subprocess, "Popen", side_effect=fake_popen
-    ):
-        try:
-            codex_quota.fetch_quota(1, "http://127.0.0.1:7890")
-        except StopAfterSpawn:
-            pass
-
-    assert captured["HTTP_PROXY"] == "http://127.0.0.1:7890"
-    assert captured["HTTPS_PROXY"] == "http://127.0.0.1:7890"
-    assert captured["http_proxy"] == "http://127.0.0.1:7890"
-    assert captured["https_proxy"] == "http://127.0.0.1:7890"
+    handler.assert_called_once_with(
+        {"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890"}
+    )
+    builder.assert_called_once_with(proxy_handler)
+    assert opener == "opener"
 
 
 def test_claude_request_uses_explicit_proxy_opener():

@@ -1,13 +1,14 @@
 # codex-quota
 
-在终端查询当前 Codex 登录账户的剩余额度。工具通过本机 `codex app-server`
-调用 `account/rateLimits/read`，不会读取、打印或保存登录凭据。
+在终端或 macOS 菜单栏查询当前 Codex、Claude 登录账户的剩余额度。Codex 部分采用
+与 OpenUsage 相同的方式：读取 Codex 已保存的 OAuth 登录，直接请求
+`https://chatgpt.com/backend-api/wham/usage`，不需要启动 Codex App 或
+`codex app-server`。
 
 ## 要求
 
 - Python 3.9+
-- 已安装 Codex CLI
-- 已通过 `codex login` 登录 ChatGPT 账户
+- 曾通过 Codex CLI 登录 ChatGPT 账户（打包后的应用运行时不依赖 `codex` 可执行文件）
 - 菜单栏面板（`codex_quota_window.py`）仅支持 macOS，依赖 PyObjC
 - 可选：已通过 `claude` 登录 Claude Code，用于显示 Claude Session/Weekly 剩余额度；
   未登录时面板里会显示对应的查询失败提示，不影响 Codex 部分正常工作
@@ -40,8 +41,8 @@ popover，自带箭头指向图标），点击面板外部、按 Esc 或再次�
 
 面板底部还会显示 Claude Session（5 小时窗口）、Weekly（7 天窗口），以及账户实际
 返回的 Sonnet、Fable 和 Extra Usage，样式和 Codex 部分一致。Codex 的窗口会按返回的
-实际周期识别，因此只有 Weekly 时也不会被误标成短周期。Anthropic 没有像 Codex
-`account/rateLimits/read` 那样的公开限额接口，
+实际周期识别，因此只有 Weekly 时也不会被误标成短周期。Anthropic 没有对应的公开
+限额接口，
 这里用的是 Claude Code 自己也在用的**非官方**接口 `GET api.anthropic.com/api/oauth/usage`：
 按 Claude Code 的规则优先读取 macOS 钥匙串（包括 `CLAUDE_CONFIG_DIR` 对应的条目），
 再退回读取配置目录中的 `.credentials.json`；某个来源失效时会继续尝试下一个来源。
@@ -66,8 +67,8 @@ python3 codex_quota_window.py --refresh 60
 ### HTTP 代理
 
 点击面板右上角的 **⚙︎**，可以填写 HTTP(S) 代理，例如
-`http://127.0.0.1:7890`。保存后会立即刷新，并同时用于 Codex App Server 和 Claude
-用量接口；点击 **清除** 后恢复系统默认网络设置。代理地址保存在当前用户的 macOS
+`http://127.0.0.1:7890`。保存后会立即刷新，并同时用于 Codex 和 Claude 的用量
+接口；点击 **清除** 后恢复系统默认网络设置。代理地址保存在当前用户的 macOS
 应用偏好设置中，不会写入项目文件或日志。
 
 终端命令也可以临时指定代理：
@@ -124,8 +125,8 @@ pyinstaller --noconfirm --clean CodexQuota.spec
 
 - “剩余百分比”按 Codex 返回的 `usedPercent` 计算。
 - 重置时间会转换为本机时区，并显示距离重置的大致时长。
-- App Server 当前在 Codex CLI 中标记为 experimental，升级 CLI 后如协议发生变化，
-  可能需要同步调整本工具。
+- Codex 用量接口属于 ChatGPT 后端接口，应用会在 OAuth Token 即将过期或接口返回
+  401/403 时刷新 Token，并把轮换后的 Token 写回原来的 `auth.json` 或钥匙串。
 - Claude 用量查询的接口/凭据读取方式参考了开源项目
   [robinebers/openusage](https://github.com/robinebers/openusage)（`docs/providers/claude.md`）
   的公开实现；同样属于非官方接口，Anthropic 调整后可能需要同步更新。

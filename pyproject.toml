@@ -18,4 +18,4 @@ codex-quota = "codex_quota:main"
 codex-quota-window = "codex_quota_window:main"
 
 [tool.setuptools]
-py-modules = ["codex_quota", "codex_quota_window", "token_usage"]
+py-modules = ["codex_quota", "codex_quota_window", "codex_usage", "token_usage"]

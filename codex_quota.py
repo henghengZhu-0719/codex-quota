@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-"""Display the remaining Codex allowance from the local Codex CLI."""
+"""Display Codex allowance using the OAuth login stored by Codex."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import selectors
-import shutil
-import subprocess
 import sys
 import time
 from datetime import datetime
 from typing import Any, Optional
 from urllib.parse import urlsplit
+
+from codex_usage import CodexUsageError, fetch_codex_usage
 
 
 VERSION = "0.1.0"
@@ -42,117 +41,11 @@ def normalize_proxy_url(value: Any) -> Optional[str]:
     return proxy
 
 
-def _send(proc: subprocess.Popen[str], message: dict[str, Any]) -> None:
-    assert proc.stdin is not None
-    proc.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
-    proc.stdin.flush()
-
-
-def _wait_for_response(
-    proc: subprocess.Popen[str], request_id: int, timeout: float
-) -> dict[str, Any]:
-    assert proc.stdout is not None
-    assert proc.stderr is not None
-    selector = selectors.DefaultSelector()
-    selector.register(proc.stdout, selectors.EVENT_READ, "stdout")
-    selector.register(proc.stderr, selectors.EVENT_READ, "stderr")
-    deadline = time.monotonic() + timeout
-    errors: list[str] = []
-
-    try:
-        while time.monotonic() < deadline:
-            events = selector.select(max(0.0, deadline - time.monotonic()))
-            if not events:
-                break
-            for key, _ in events:
-                line = key.fileobj.readline()
-                if not line:
-                    continue
-                if key.data == "stderr":
-                    errors.append(line.strip())
-                    continue
-                try:
-                    message = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if message.get("id") != request_id:
-                    continue
-                if "error" in message:
-                    error = message["error"]
-                    detail = error.get("message", str(error)) if isinstance(error, dict) else str(error)
-                    raise QuotaError(detail)
-                result = message.get("result")
-                if not isinstance(result, dict):
-                    raise QuotaError("Codex 返回了无效响应")
-                return result
-            if proc.poll() is not None:
-                break
-    finally:
-        selector.close()
-
-    detail = next((line for line in reversed(errors) if line), "")
-    if proc.poll() is not None:
-        raise QuotaError(f"Codex App Server 已退出{': ' + detail if detail else ''}")
-    raise QuotaError(f"等待 Codex 响应超时（{timeout:g} 秒）")
-
-
 def fetch_quota(timeout: float, proxy_url: Optional[str] = None) -> dict[str, Any]:
-    codex = shutil.which("codex")
-    if not codex:
-        raise QuotaError("找不到 codex 命令，请先安装 Codex CLI")
-
-    proxy = normalize_proxy_url(proxy_url)
-    child_environment = None
-    if proxy:
-        child_environment = os.environ.copy()
-        child_environment.update(
-            {
-                "HTTP_PROXY": proxy,
-                "HTTPS_PROXY": proxy,
-                "http_proxy": proxy,
-                "https_proxy": proxy,
-            }
-        )
-
-    proc = subprocess.Popen(
-        [codex, "app-server", "--stdio"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-        env=child_environment,
-    )
     try:
-        _send(
-            proc,
-            {
-                "method": "initialize",
-                "id": 1,
-                "params": {
-                    "clientInfo": {
-                        "name": "codex_quota_cli",
-                        "title": "Codex Quota CLI",
-                        "version": VERSION,
-                    }
-                },
-            },
-        )
-        _wait_for_response(proc, 1, timeout)
-        _send(proc, {"method": "initialized", "params": {}})
-        _send(proc, {"method": "account/rateLimits/read", "id": 2, "params": None})
-        return _wait_for_response(proc, 2, timeout)
-    except BrokenPipeError as exc:
-        raise QuotaError("无法连接 Codex App Server") from exc
-    finally:
-        if proc.stdin:
-            proc.stdin.close()
-        proc.terminate()
-        try:
-            proc.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+        return fetch_codex_usage(timeout, normalize_proxy_url(proxy_url))
+    except CodexUsageError as exc:
+        raise QuotaError(str(exc)) from exc
 
 
 def _format_duration(minutes: Any) -> str:
