@@ -17,12 +17,17 @@ icon_file = next(
     None,
 )
 icon = str(icon_file) if icon_file is not None else None
+provider_icon_dir = project_dir / "assets" / "provider-icons"
+provider_icons = [
+    (str(provider_icon_dir / name), "assets/provider-icons")
+    for name in ("codex.svg", "claude.svg")
+]
 
 a = Analysis(
     [str(project_dir / "codex_quota_window.py")],
     pathex=[str(project_dir)],
     binaries=[],
-    datas=[],
+    datas=provider_icons,
     hiddenimports=["AppKit", "Foundation", "objc", "PyObjCTools.AppHelper"],
     hookspath=[],
     hooksconfig={},

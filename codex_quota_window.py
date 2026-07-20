@@ -4,14 +4,20 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import os
+import re
 import subprocess
+import sys
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Optional
 
 import objc
@@ -20,6 +26,9 @@ try:
     from AppKit import (
         NSAppearance,
         NSAppearanceNameAqua,
+        NSAlert,
+        NSAlertFirstButtonReturn,
+        NSAlertThirdButtonReturn,
         NSApplication,
         NSApplicationActivationPolicyAccessory,
         NSApp,
@@ -30,16 +39,18 @@ try:
         NSEventMaskRightMouseUp,
         NSEventTypeRightMouseUp,
         NSFont,
+        NSFontAttributeName,
         NSFontWeightBold,
         NSFontWeightRegular,
         NSFontWeightSemibold,
         NSImage,
-        NSLineCapStyleRound,
+        NSImageView,
         NSMenu,
         NSMenuItem,
         NSMinYEdge,
         NSPopover,
         NSPopoverBehaviorTransient,
+        NSForegroundColorAttributeName,
         NSStatusBar,
         NSTextAlignmentCenter,
         NSTextAlignmentRight,
@@ -54,74 +65,134 @@ try:
         NSVisualEffectStateActive,
         NSVisualEffectView,
     )
-    from Foundation import NSMakeRect, NSMakeSize, NSObject, NSTimer
+    from Foundation import (
+        NSMakePoint,
+        NSMakeRect,
+        NSMakeSize,
+        NSObject,
+        NSString,
+        NSTimer,
+        NSUserDefaults,
+    )
     from PyObjCTools import AppHelper
 except ImportError as exc:  # pragma: no cover - depends on the desktop environment
     raise SystemExit(
         "缺少 PyObjC。请运行 `python3 -m pip install pyobjc-framework-Cocoa` 后重试。"
     ) from exc
 
-from codex_quota import QuotaError, _snapshots, fetch_quota
+from codex_quota import QuotaError, _snapshots, fetch_quota, normalize_proxy_url
+from token_usage import TokenTotals, scan_token_usage
+
+
+def _resource_path(*parts: str) -> Path:
+    """Resolve a resource in source checkouts and PyInstaller bundles."""
+    bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return bundle_root.joinpath(*parts)
+
+
+_PROVIDER_ICON_CACHE: dict[str, Optional["NSImage"]] = {}
+
+
+def _provider_icon(name: str) -> Optional["NSImage"]:
+    cached = _PROVIDER_ICON_CACHE.get(name)
+    if cached is not None:
+        return cached
+    path = _resource_path("assets", "provider-icons", f"{name}.svg")
+    image = NSImage.alloc().initWithContentsOfFile_(str(path)) if path.is_file() else None
+    if image is not None:
+        image.setTemplate_(True)
+    _PROVIDER_ICON_CACHE[name] = image
+    return image
 
 
 class ClaudeStatusError(RuntimeError):
     """A user-facing Claude usage query error."""
 
 
-def _read_claude_oauth() -> dict[str, Any]:
-    """Read the local Claude Code OAuth credential (access token + plan info).
-
-    Prefers the macOS Keychain entry Claude Code itself writes
-    ("Claude Code-credentials"), falling back to the on-disk
-    ~/.claude/.credentials.json file it maintains as a secondary copy.
-    Read-only: this never writes, logs, or sends the token anywhere except
-    in the Authorization header of the one HTTPS request that follows.
-    """
-    raw: Optional[str] = None
-    try:
-        result = subprocess.run(
-            [
-                "security",
-                "find-generic-password",
-                "-s",
-                "Claude Code-credentials",
-                "-a",
-                os.environ.get("USER", ""),
-                "-w",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            raw = result.stdout.strip()
-    except (OSError, subprocess.TimeoutExpired):
-        raw = None
-
-    if not raw:
-        config_dir = os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude")
-        creds_path = os.path.expanduser(os.path.join(config_dir, ".credentials.json"))
-        try:
-            with open(creds_path, "r", encoding="utf-8") as handle:
-                raw = handle.read()
-        except OSError:
-            raw = None
-
-    if not raw:
-        raise ClaudeStatusError("未找到 Claude 登录凭据，请先运行 `claude` 登录")
-
+def _parse_claude_oauth(raw: str) -> Optional[dict[str, Any]]:
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ClaudeStatusError("Claude 登录凭据格式无效") from exc
+    except json.JSONDecodeError:
+        return None
 
     oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
-    if not isinstance(oauth, dict) or not oauth.get("accessToken"):
+    if not isinstance(oauth, dict):
+        return None
+    token = oauth.get("accessToken")
+    return oauth if isinstance(token, str) and token.strip() else None
+
+
+def _claude_keychain_services() -> list[str]:
+    """Return the service names Claude Code uses for this config directory."""
+    base = "Claude Code-credentials"
+    literal = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if not literal:
+        return [base]
+    normalized = unicodedata.normalize("NFC", literal)
+    suffix = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:8]
+    return [f"{base}-{suffix}", base]
+
+
+def _read_claude_oauth_candidates() -> list[dict[str, Any]]:
+    """Read Claude Code logins in OpenUsage's keychain-before-file order.
+
+    More than one candidate is intentionally retained: recent Claude Code
+    versions treat Keychain as the source of truth but can leave a stale file
+    behind, while a fresh external login can occasionally land in the other
+    source. The caller can therefore fall through after an auth rejection.
+    """
+    candidates: list[dict[str, Any]] = []
+    seen_tokens: set[str] = set()
+
+    def append(raw: Optional[str]) -> None:
+        if not raw:
+            return
+        oauth = _parse_claude_oauth(raw)
+        if oauth is None:
+            return
+        token = str(oauth["accessToken"]).strip()
+        if token not in seen_tokens:
+            seen_tokens.add(token)
+            candidates.append(oauth)
+
+    user = os.environ.get("USER", "").strip()
+    for service in _claude_keychain_services():
+        commands = []
+        if user:
+            commands.append(
+                ["security", "find-generic-password", "-s", service, "-a", user, "-w"]
+            )
+        commands.append(["security", "find-generic-password", "-s", service, "-w"])
+        for command in commands:
+            try:
+                result = subprocess.run(
+                    command, capture_output=True, text=True, timeout=5
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            if result.returncode == 0:
+                append(result.stdout.strip())
+
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude")
+    creds_path = os.path.expanduser(os.path.join(config_dir, ".credentials.json"))
+    try:
+        with open(creds_path, "r", encoding="utf-8") as handle:
+            append(handle.read())
+    except OSError:
+        pass
+
+    if not candidates:
+        if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip():
+            raise ClaudeStatusError(
+                "CLAUDE_CODE_OAUTH_TOKEN 不能读取订阅限额，请运行 `claude` 完成账户登录"
+            )
         raise ClaudeStatusError("未找到 Claude 登录凭据，请先运行 `claude` 登录")
-    return oauth
+    return candidates
 
 
-def fetch_claude_usage(timeout: float) -> dict[str, Any]:
+def fetch_claude_usage(
+    timeout: float, proxy_url: Optional[str] = None
+) -> dict[str, Any]:
     """Query Anthropic's (undocumented) `/api/oauth/usage` endpoint for the
     account's real Session (5h) / Weekly (7d) rate-limit percentages — the
     same kind of data Codex exposes officially via `account/rateLimits/read`,
@@ -130,42 +201,57 @@ def fetch_claude_usage(timeout: float) -> dict[str, Any]:
     is attempted, so an expired token surfaces as an error asking the user
     to re-run `claude` rather than being silently renewed.
     """
-    oauth = _read_claude_oauth()
-    token = oauth.get("accessToken")
+    candidates = _read_claude_oauth_candidates()
+    proxy = normalize_proxy_url(proxy_url)
+    opener = None
+    if proxy:
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+        )
+    for index, oauth in enumerate(candidates):
+        token = str(oauth["accessToken"]).strip()
+        request = urllib.request.Request(
+            "https://api.anthropic.com/api/oauth/usage",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "anthropic-beta": "oauth-2025-04-20",
+                "User-Agent": "claude-code/2.1.69",
+            },
+        )
+        try:
+            open_request = opener.open if opener is not None else urllib.request.urlopen
+            with open_request(request, timeout=timeout) as response:
+                body = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403) and index + 1 < len(candidates):
+                continue
+            if exc.code in (401, 403):
+                raise ClaudeStatusError(
+                    "Claude 登录已过期或无权读取限额，请重新运行 `claude` 登录"
+                ) from exc
+            if exc.code == 429:
+                retry_after = exc.headers.get("retry-after") if exc.headers else None
+                suffix = f"，约 {retry_after} 秒后重试" if retry_after else ""
+                raise ClaudeStatusError(f"Claude 用量查询被限流{suffix}") from exc
+            raise ClaudeStatusError(f"Claude 用量查询失败（HTTP {exc.code}）") from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            reason = getattr(exc, "reason", exc)
+            raise ClaudeStatusError(f"无法连接 Claude 用量接口：{reason}") from exc
 
-    request = urllib.request.Request(
-        "https://api.anthropic.com/api/oauth/usage",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "anthropic-beta": "oauth-2025-04-20",
-            "User-Agent": "claude-code/2.1.69",
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            body = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        if exc.code == 401:
-            raise ClaudeStatusError("Claude 登录已过期，请重新运行 `claude` 登录") from exc
-        if exc.code == 429:
-            retry_after = exc.headers.get("retry-after") if exc.headers else None
-            suffix = f"，约 {retry_after} 秒后重试" if retry_after else ""
-            raise ClaudeStatusError(f"Claude 用量查询被限流{suffix}") from exc
-        raise ClaudeStatusError(f"Claude 用量查询失败（HTTP {exc.code}）") from exc
-    except urllib.error.URLError as exc:
-        raise ClaudeStatusError(f"无法连接 Claude 用量接口：{exc.reason}") from exc
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise ClaudeStatusError("Claude 返回了无效的 JSON") from exc
+        if not isinstance(data, dict):
+            raise ClaudeStatusError("Claude 返回了意料之外的数据格式")
 
-    try:
-        data = json.loads(body)
-    except json.JSONDecodeError as exc:
-        raise ClaudeStatusError("Claude 返回了无效的 JSON") from exc
-    if not isinstance(data, dict):
-        raise ClaudeStatusError("Claude 返回了意料之外的数据格式")
+        data["_plan"] = oauth.get("subscriptionType")
+        data["_rate_limit_tier"] = oauth.get("rateLimitTier")
+        return data
 
-    data["_plan"] = oauth.get("subscriptionType")
-    return data
+    raise ClaudeStatusError("Claude 登录已过期，请重新运行 `claude` 登录")
 
 
 def _parse_claude_reset(value: Any) -> Optional[int]:
@@ -194,7 +280,6 @@ PRIMARY_TEXT = NSColor.blackColor()
 SECONDARY_TEXT = NSColor.colorWithCalibratedWhite_alpha_(0.0, 0.85)
 SUBTLE_TEXT = NSColor.colorWithCalibratedWhite_alpha_(0.0, 0.7)
 MUTED_TEXT = NSColor.colorWithCalibratedWhite_alpha_(0.0, 0.48)
-TRACK_COLOR = NSColor.colorWithCalibratedWhite_alpha_(0.0, 0.14)
 SEPARATOR_COLOR = NSColor.colorWithCalibratedWhite_alpha_(0.0, 0.1)
 BAR_TRACK_COLOR = NSColor.colorWithCalibratedWhite_alpha_(0.0, 0.12)
 
@@ -203,8 +288,20 @@ MARGIN_X = 22
 TOP_PAD = 18
 BOTTOM_PAD = 20
 HEADER_HEIGHT = 26
-ICON_SIZE = 20.0
-ICON_RING_WIDTH = 3.2
+TRAY_HEIGHT = 18.0
+TRAY_ICON_SIZE = 15.0
+TRAY_ICON_TEXT_GAP = 3.0
+TRAY_GROUP_GAP = 10.0
+TRAY_FONT_SIZE = 10.0
+PROXY_DEFAULTS_KEY = "CodexQuotaHTTPProxy"
+
+ROW_HEIGHT = 18
+ROW_LABEL_WIDTH = 112
+ROW_PERCENT_WIDTH = 44
+ROW_BAR_GAP = 10
+ROW_BAR_HEIGHT = 6
+RESET_HEIGHT = 14
+WINDOW_GAP = 10
 
 
 def _remaining(window: dict[str, Any]) -> int:
@@ -215,64 +312,181 @@ def _remaining(window: dict[str, Any]) -> int:
     return max(0, min(100, 100 - used))
 
 
+def _codex_windows(snapshot: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """Classify Codex windows by duration, preserving slot fallback.
+
+    Codex can temporarily return a weekly-only limit in the primary slot.
+    OpenUsage therefore treats the explicit duration as authoritative.
+    """
+    candidates: list[tuple[str, Optional[str], dict[str, Any]]] = []
+    for fallback, key in (("session", "primary"), ("weekly", "secondary")):
+        value = snapshot.get(key)
+        if isinstance(value, dict):
+            duration = value.get("windowDurationMins")
+            if duration == 5 * 60:
+                exact = "session"
+            elif duration == 7 * 24 * 60:
+                exact = "weekly"
+            else:
+                exact = None
+            candidates.append((fallback, exact, value))
+
+    rows: list[tuple[str, dict[str, Any]]] = []
+    for wanted, label in (("session", "会话（5 小时）"), ("weekly", "每周")):
+        match = next((window for _, exact, window in candidates if exact == wanted), None)
+        if match is None:
+            match = next(
+                (
+                    window
+                    for fallback, exact, window in candidates
+                    if exact is None and fallback == wanted
+                ),
+                None,
+            )
+        if match is not None:
+            rows.append((label, match))
+    return rows
+
+
+def _claude_windows(usage: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    rows: list[tuple[str, dict[str, Any]]] = []
+
+    def append(label: str, value: Any) -> None:
+        if isinstance(value, dict) and isinstance(value.get("utilization"), (int, float)):
+            rows.append((label, value))
+
+    append("会话（5 小时）", usage.get("five_hour"))
+    append("每周", usage.get("seven_day"))
+    append("Sonnet 每周", usage.get("seven_day_sonnet"))
+
+    limits = usage.get("limits")
+    if isinstance(limits, list):
+        for entry in limits:
+            if not isinstance(entry, dict) or entry.get("kind") != "weekly_scoped":
+                continue
+            scope = entry.get("scope")
+            model = scope.get("model") if isinstance(scope, dict) else None
+            display_name = model.get("display_name") if isinstance(model, dict) else None
+            percent = entry.get("percent")
+            if display_name == "Fable" and isinstance(percent, (int, float)):
+                append(
+                    "Fable 每周",
+                    {"utilization": percent, "resets_at": entry.get("resets_at")},
+                )
+                break
+    return rows
+
+
+def _format_claude_plan(usage: dict[str, Any]) -> Optional[str]:
+    raw = usage.get("_plan")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    plan = raw.strip().replace("_", " ").title()
+    tier = usage.get("_rate_limit_tier")
+    if isinstance(tier, str):
+        match = re.search(r"\d+x", tier, re.IGNORECASE)
+        if match:
+            plan += f" {match.group(0)}"
+    return plan
+
+
+def _format_token_count(value: int) -> str:
+    if value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.1f}B Token"
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M Token"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}K Token"
+    return f"{value} Token"
+
+
 def _short_reset(timestamp: Any) -> str:
     if not isinstance(timestamp, int):
-        return "Reset time unavailable"
+        return "重置时间不可用"
     now = datetime.now().astimezone()
     reset = datetime.fromtimestamp(timestamp).astimezone()
     seconds = max(0, timestamp - int(now.timestamp()))
     if seconds < 60:
-        return "Reset in < 1m"
+        return "不到 1 分钟后重置"
     elif seconds < 3600:
-        return f"Reset in {seconds // 60}m"
+        return f"{seconds // 60} 分钟后重置"
     elif reset.date() == now.date():
-        return f"Reset in {seconds // 3600}h {seconds % 3600 // 60}m"
+        return f"{seconds // 3600} 小时 {seconds % 3600 // 60} 分钟后重置"
     elif reset.date() == now.date() + timedelta(days=1):
-        return f"Reset tomorrow at {reset:%H:%M}"
-    return f"Reset {reset:%a at %H:%M}"
+        return f"明天 {reset:%H:%M} 重置"
+    return f"{reset:%m-%d %H:%M} 重置"
 
 
-def _tray_image(percent: Optional[int] = None, error: bool = False) -> "NSImage":
-    """Draw a battery-style ring gauge for the status item — icon only, no text."""
-    size = ICON_SIZE
-    ring_width = ICON_RING_WIDTH
-    rect = NSMakeRect(ring_width / 2, ring_width / 2, size - ring_width, size - ring_width)
+def _tooltip_part(name: str, percent: Optional[int], failed: bool) -> str:
+    if failed:
+        return f"{name} 查询失败"
+    if percent is None:
+        return f"{name} —"
+    return f"{name} {percent}%"
+
+
+def _bar_color(remaining: int) -> "NSColor":
+    return ACCENT if remaining > 50 else (WARN if remaining > 20 else DANGER)
+
+
+def _tray_value(percent: Optional[int], error: bool) -> str:
+    if error:
+        return "!"
+    if percent is None:
+        return "—"
+    return f"{max(0, min(100, percent))}%"
+
+
+def _tray_image(
+    codex: Optional[int] = None,
+    claude: Optional[int] = None,
+    codex_error: bool = False,
+    claude_error: bool = False,
+) -> "NSImage":
+    """Draw two OpenUsage-style provider groups: mark followed by value."""
+    font = NSFont.monospacedDigitSystemFontOfSize_weight_(
+        TRAY_FONT_SIZE, NSFontWeightSemibold
+    )
+    attributes = {
+        NSFontAttributeName: font,
+        NSForegroundColorAttributeName: NSColor.blackColor(),
+    }
+    groups = [
+        ("codex", NSString.stringWithString_(_tray_value(codex, codex_error))),
+        ("claude", NSString.stringWithString_(_tray_value(claude, claude_error))),
+    ]
+    text_sizes = [text.sizeWithAttributes_(attributes) for _, text in groups]
+    group_widths = [
+        TRAY_ICON_SIZE + TRAY_ICON_TEXT_GAP + size.width for size in text_sizes
+    ]
+    width = math.ceil(sum(group_widths) + TRAY_GROUP_GAP)
 
     def draw(_rect) -> bool:
-        track = NSBezierPath.bezierPath()
-        track.appendBezierPathWithOvalInRect_(rect)
-        track.setLineWidth_(ring_width)
-        TRACK_COLOR.setStroke()
-        track.stroke()
-
-        if error:
-            arc = NSBezierPath.bezierPath()
-            arc.appendBezierPathWithOvalInRect_(rect)
-            arc.setLineWidth_(ring_width)
-            DANGER.setStroke()
-            arc.stroke()
-        elif percent is not None:
-            remaining = max(0, min(100, percent))
-            if remaining:
-                color = ACCENT if remaining > 50 else (WARN if remaining > 20 else DANGER)
-                center = (size / 2, size / 2)
-                radius = (size - ring_width) / 2
-                # 0 deg = 3 o'clock, angles grow counter-clockwise; start at
-                # 12 o'clock and sweep clockwise by the remaining fraction.
-                start_angle = 90.0
-                end_angle = 90.0 - (remaining / 100.0) * 360.0
-                arc = NSBezierPath.bezierPath()
-                arc.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise_(
-                    center, radius, start_angle, end_angle, True
+        x = 0.0
+        for index, ((provider, text), text_size) in enumerate(zip(groups, text_sizes)):
+            icon = _provider_icon(provider)
+            if icon is not None:
+                icon.drawInRect_(
+                    NSMakeRect(
+                        x,
+                        (TRAY_HEIGHT - TRAY_ICON_SIZE) / 2,
+                        TRAY_ICON_SIZE,
+                        TRAY_ICON_SIZE,
+                    )
                 )
-                arc.setLineWidth_(ring_width)
-                arc.setLineCapStyle_(NSLineCapStyleRound)
-                color.setStroke()
-                arc.stroke()
+            x += TRAY_ICON_SIZE + TRAY_ICON_TEXT_GAP
+            text.drawAtPoint_withAttributes_(
+                NSMakePoint(x, (TRAY_HEIGHT - text_size.height) / 2), attributes
+            )
+            x += text_size.width
+            if index == 0:
+                x += TRAY_GROUP_GAP
         return True
 
-    image = NSImage.imageWithSize_flipped_drawingHandler_(NSMakeSize(size, size), False, draw)
-    image.setTemplate_(False)
+    image = NSImage.imageWithSize_flipped_drawingHandler_(
+        NSMakeSize(width, TRAY_HEIGHT), False, draw
+    )
+    image.setTemplate_(True)
     return image
 
 
@@ -366,6 +580,18 @@ class _Layout:
         self.views.append(view)
         self.y += height
 
+    def add_row(self, items: list[tuple[Any, float, float, float]], height: float) -> None:
+        """Place several views side by side on one line.
+
+        Each item is (view, x offset within the column, width, view height);
+        shorter views are centred vertically against the row height.
+        """
+        for view, dx, width, view_height in items:
+            dy = (height - view_height) / 2
+            view.setFrame_(NSMakeRect(self.x + dx, self.y + dy, width, view_height))
+            self.views.append(view)
+        self.y += height
+
     def space(self, height: float) -> None:
         self.y += height
 
@@ -381,9 +607,12 @@ class QuotaMenuBarApp(NSObject):
         self.popover = None
         self.effect_view = None
         self.header_refresh_button = None
+        self.header_settings_button = None
         self._fetching = False
         self._refresh_timer = None
         self._last_close_time: Optional[float] = None
+        saved_proxy = NSUserDefaults.standardUserDefaults().stringForKey_(PROXY_DEFAULTS_KEY)
+        self.proxy_url = str(saved_proxy).strip() if saved_proxy else None
         return self
 
     # -- App lifecycle --------------------------------------------------
@@ -401,7 +630,7 @@ class QuotaMenuBarApp(NSObject):
         )
         button = status_item.button()
         button.setImage_(_tray_image())
-        button.setToolTip_("Codex Quota")
+        button.setToolTip_("Codex · Claude 额度")
         button.setTarget_(self)
         button.setAction_("statusItemClicked:")
         button.sendActionOn_(NSEventMaskLeftMouseUp | NSEventMaskRightMouseUp)
@@ -432,11 +661,11 @@ class QuotaMenuBarApp(NSObject):
         # popover's plain window background instead of the vibrancy material.
         effect_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
 
-        dot = _make_label("●", 17, NSFontWeightRegular, ACCENT)
-        dot.setFrame_(NSMakeRect(MARGIN_X, TOP_PAD, 16, HEADER_HEIGHT))
-        effect_view.addSubview_(dot)
+        # dot = _make_label("●", 17, NSFontWeightRegular, ACCENT)
+        # dot.setFrame_(NSMakeRect(MARGIN_X, TOP_PAD, 16, HEADER_HEIGHT))
+        # effect_view.addSubview_(dot)
 
-        title = _make_label("Codex", 15, NSFontWeightSemibold, PRIMARY_TEXT)
+        title = _make_label("用量", 15, NSFontWeightSemibold, PRIMARY_TEXT)
         title.setFrame_(NSMakeRect(MARGIN_X + 18, TOP_PAD, 120, HEADER_HEIGHT))
         effect_view.addSubview_(title)
 
@@ -452,6 +681,13 @@ class QuotaMenuBarApp(NSObject):
         )
         effect_view.addSubview_(refresh_button)
         self.header_refresh_button = refresh_button
+
+        settings_button = _make_icon_button("⚙︎", self, "settingsClicked:")
+        settings_button.setFrame_(
+            NSMakeRect(CARD_WIDTH - MARGIN_X - 84, TOP_PAD - 2, 24, HEADER_HEIGHT)
+        )
+        effect_view.addSubview_(settings_button)
+        self.header_settings_button = settings_button
 
         body = _FlippedView.alloc().initWithFrame_(
             NSMakeRect(0, TOP_PAD + HEADER_HEIGHT + 12, CARD_WIDTH, 10)
@@ -481,7 +717,7 @@ class QuotaMenuBarApp(NSObject):
 
         menu = NSMenu.alloc().init()
         quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "Quit", "quitClicked:", ""
+            "退出", "quitClicked:", ""
         )
         quit_item.setTarget_(self)
         menu.addItem_(quit_item)
@@ -522,6 +758,46 @@ class QuotaMenuBarApp(NSObject):
     def refreshClicked_(self, sender) -> None:
         self.refresh()
 
+    def settingsClicked_(self, sender) -> None:
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("HTTP 代理")
+        alert.setInformativeText_(
+            "代理将同时用于 Codex 和 Claude 的网络请求。清空后恢复系统默认设置。"
+        )
+        field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 360, 24))
+        field.setPlaceholderString_("http://127.0.0.1:7890")
+        field.setStringValue_(self.proxy_url or "")
+        alert.setAccessoryView_(field)
+        alert.addButtonWithTitle_("保存")
+        alert.addButtonWithTitle_("取消")
+        alert.addButtonWithTitle_("清除")
+
+        response = alert.runModal()
+        if response == NSAlertThirdButtonReturn:
+            self._save_proxy(None)
+            return
+        if response != NSAlertFirstButtonReturn:
+            return
+        try:
+            proxy = normalize_proxy_url(field.stringValue())
+        except QuotaError as exc:
+            error_alert = NSAlert.alloc().init()
+            error_alert.setMessageText_("代理地址无效")
+            error_alert.setInformativeText_(str(exc))
+            error_alert.addButtonWithTitle_("确定")
+            error_alert.runModal()
+            return
+        self._save_proxy(proxy)
+
+    def _save_proxy(self, proxy: Optional[str]) -> None:
+        defaults = NSUserDefaults.standardUserDefaults()
+        if proxy:
+            defaults.setObject_forKey_(proxy, PROXY_DEFAULTS_KEY)
+        else:
+            defaults.removeObjectForKey_(PROXY_DEFAULTS_KEY)
+        self.proxy_url = proxy
+        self.refresh()
+
     def quitClicked_(self, sender) -> None:
         NSApp.terminate_(None)
 
@@ -540,19 +816,32 @@ class QuotaMenuBarApp(NSObject):
         codex_payload: Optional[dict[str, Any]] = None
         codex_error: Optional[str] = None
         try:
-            codex_payload = fetch_quota(self.timeout)
+            codex_payload = fetch_quota(self.timeout, self.proxy_url)
         except (QuotaError, OSError) as exc:
             codex_error = str(exc)
 
         claude_usage: Optional[dict[str, Any]] = None
         claude_error: Optional[str] = None
         try:
-            claude_usage = fetch_claude_usage(self.timeout)
+            claude_usage = fetch_claude_usage(self.timeout, self.proxy_url)
         except (ClaudeStatusError, OSError) as exc:
             claude_error = str(exc)
 
+        token_usage: Optional[dict[str, dict[str, TokenTotals]]] = None
+        try:
+            token_usage = scan_token_usage()
+        except OSError:
+            # Live quotas should remain usable if a local log directory becomes
+            # unreadable while it is being scanned.
+            token_usage = None
+
         AppHelper.callAfter(
-            self._on_fetch_done, codex_payload, codex_error, claude_usage, claude_error
+            self._on_fetch_done,
+            codex_payload,
+            codex_error,
+            claude_usage,
+            claude_error,
+            token_usage,
         )
 
     def _on_fetch_done(
@@ -561,8 +850,11 @@ class QuotaMenuBarApp(NSObject):
         codex_error: Optional[str],
         claude_usage: Optional[dict[str, Any]],
         claude_error: Optional[str],
+        token_usage: Optional[dict[str, dict[str, TokenTotals]]],
     ) -> None:
-        self._render_status(codex_payload, codex_error, claude_usage, claude_error)
+        self._render_status(
+            codex_payload, codex_error, claude_usage, claude_error, token_usage
+        )
         self._finish_refresh()
 
     def _finish_refresh(self) -> None:
@@ -599,7 +891,7 @@ class QuotaMenuBarApp(NSObject):
         self._clear_body()
         layout = _Layout(MARGIN_X, CARD_WIDTH - 2 * MARGIN_X, 0)
         label = _make_label(
-            "正在查询 Codex 剩余额度…", 12, NSFontWeightRegular, MUTED_TEXT
+            "正在查询剩余额度…", 12, NSFontWeightRegular, MUTED_TEXT
         )
         label.setAlignment_(NSTextAlignmentCenter)
         layout.add(label, 60)
@@ -611,13 +903,16 @@ class QuotaMenuBarApp(NSObject):
         codex_error: Optional[str],
         claude_usage: Optional[dict[str, Any]],
         claude_error: Optional[str],
+        token_usage: Optional[dict[str, dict[str, TokenTotals]]],
     ) -> None:
         layout = _Layout(MARGIN_X, CARD_WIDTH - 2 * MARGIN_X, 0)
 
         if codex_error:
             tray_percent: Optional[int] = None
+            self._layout_provider_heading(layout, "codex", "Codex")
+            layout.space(6)
             label = _make_label(
-                f"查询失败\n\n{codex_error}\n\n请运行 codex login status 检查登录状态。",
+                f"查询失败\n{codex_error}\n请运行 codex login status 检查登录状态。",
                 12,
                 NSFontWeightRegular,
                 ERROR_TEXT,
@@ -625,18 +920,24 @@ class QuotaMenuBarApp(NSObject):
             label.setAlignment_(NSTextAlignmentCenter)
             label.setPreferredMaxLayoutWidth_(CARD_WIDTH - 2 * MARGIN_X)
             label.cell().setWraps_(True)
-            layout.add(label, 90)
+            layout.add(label, 72)
         else:
             tray_percent = self._layout_codex_payload(layout, codex_payload)
+
+        layout.space(14)
+        self._layout_token_usage(layout, token_usage.get("codex") if token_usage else None)
 
         layout.space(18)
         layout.add(_Separator.alloc().init(), 1)
         layout.space(16)
-        self._layout_claude_usage(layout, claude_usage, claude_error)
+        claude_percent = self._layout_claude_usage(layout, claude_usage, claude_error)
+
+        layout.space(14)
+        self._layout_token_usage(layout, token_usage.get("claude") if token_usage else None)
 
         layout.space(18)
         updated = _make_label(
-            f"Updated {datetime.now().astimezone():%H:%M}",
+            f"更新于 {datetime.now().astimezone():%H:%M}",
             11,
             NSFontWeightRegular,
             MUTED_TEXT,
@@ -647,13 +948,26 @@ class QuotaMenuBarApp(NSObject):
         self._clear_body()
         self._finish_layout(layout)
 
-        if codex_error:
-            self.status_item.button().setImage_(_tray_image(error=True))
-            self.status_item.button().setToolTip_("Codex Quota · 查询失败")
-        else:
-            suffix = f" · {tray_percent}% remaining" if tray_percent is not None else ""
-            self.status_item.button().setImage_(_tray_image(tray_percent))
-            self.status_item.button().setToolTip_(f"Codex Quota{suffix}")
+        self._update_status_item(
+            tray_percent, bool(codex_error), claude_percent, bool(claude_error)
+        )
+
+    def _update_status_item(
+        self,
+        codex_percent: Optional[int],
+        codex_failed: bool,
+        claude_percent: Optional[int],
+        claude_failed: bool,
+    ) -> None:
+        button = self.status_item.button()
+        button.setImage_(
+            _tray_image(codex_percent, claude_percent, codex_failed, claude_failed)
+        )
+        button.setToolTip_(
+            _tooltip_part("Codex", codex_percent, codex_failed)
+            + " · "
+            + _tooltip_part("Claude", claude_percent, claude_failed)
+        )
 
     def _layout_codex_payload(
         self, layout: "_Layout", payload: dict[str, Any]
@@ -680,20 +994,12 @@ class QuotaMenuBarApp(NSObject):
             name = str(snapshot.get("limitName") or bucket_id)
             plan = snapshot.get("planType")
             heading = name + (f"  ·  {plan}" if plan else "")
-            layout.add(_make_label(heading, 13, NSFontWeightSemibold, SECONDARY_TEXT), 18)
+            self._layout_provider_heading(layout, "codex", heading)
 
-            windows = [
-                ("Short Window", snapshot.get("primary")),
-                ("Long Window", snapshot.get("secondary")),
-            ]
+            windows = _codex_windows(snapshot)
             rendered = 0
             for label_text, window in windows:
-                if not isinstance(window, dict):
-                    continue
-                layout.space(20)
-                if rendered:
-                    layout.add(_Separator.alloc().init(), 1)
-                    layout.space(20)
+                layout.space(WINDOW_GAP)
                 remaining = _remaining(window)
                 if tray_percent is None:
                     tray_percent = remaining
@@ -703,89 +1009,185 @@ class QuotaMenuBarApp(NSObject):
             if not rendered:
                 layout.space(8)
                 layout.add(
-                    _make_label("No active quota windows", 11, NSFontWeightRegular, MUTED_TEXT),
+                    _make_label("暂无限额窗口", 11, NSFontWeightRegular, MUTED_TEXT),
                     16,
                 )
 
         return tray_percent
+
+    def _layout_token_usage(
+        self, layout: "_Layout", periods: Optional[dict[str, TokenTotals]]
+    ) -> None:
+        layout.add(_make_label("本地 Token 用量", 11, NSFontWeightSemibold, MUTED_TEXT), 16)
+        if periods is None:
+            layout.add(_make_label("Token 日志不可用", 11, NSFontWeightRegular, MUTED_TEXT), 16)
+            return
+
+        rows = [
+            ("今天", periods.get("today")),
+            ("昨天", periods.get("yesterday")),
+            ("最近 30 天", periods.get("last30")),
+        ]
+        if not any(total and total.total_tokens > 0 for _, total in rows):
+            layout.add(
+                _make_label("最近 30 天暂无用量", 11, NSFontWeightRegular, MUTED_TEXT),
+                16,
+            )
+            return
+
+        for label_text, total in rows:
+            count = total.total_tokens if total else 0
+            label = _make_label(label_text, 11, NSFontWeightRegular, SUBTLE_TEXT)
+            value = _make_label(
+                _format_token_count(count),
+                11,
+                NSFontWeightSemibold,
+                SECONDARY_TEXT,
+                NSTextAlignmentRight,
+            )
+            layout.add_row(
+                [
+                    (label, 0, ROW_LABEL_WIDTH, 16),
+                    (value, ROW_LABEL_WIDTH, layout.width - ROW_LABEL_WIDTH, 16),
+                ],
+                18,
+            )
 
     def _layout_claude_usage(
         self,
         layout: "_Layout",
         usage: Optional[dict[str, Any]],
         error: Optional[str],
-    ) -> None:
+    ) -> Optional[int]:
         if error:
-            layout.add(_make_label("Claude", 13, NSFontWeightSemibold, SECONDARY_TEXT), 18)
+            self._layout_provider_heading(layout, "claude", "Claude")
             layout.space(6)
             label = _make_label(error, 11, NSFontWeightRegular, ERROR_TEXT)
             label.setPreferredMaxLayoutWidth_(layout.width)
             label.cell().setWraps_(True)
             layout.add(label, 32)
-            return
+            return None
         if usage is None:
-            layout.add(_make_label("Claude", 13, NSFontWeightSemibold, SECONDARY_TEXT), 18)
+            self._layout_provider_heading(layout, "claude", "Claude")
             layout.space(6)
             layout.add(_make_label("正在查询…", 11, NSFontWeightRegular, MUTED_TEXT), 16)
-            return
+            return None
 
-        plan = usage.get("_plan")
-        heading = "Claude" + (f"  ·  {plan.capitalize()}" if plan else "")
-        layout.add(_make_label(heading, 13, NSFontWeightSemibold, SECONDARY_TEXT), 18)
+        plan = _format_claude_plan(usage)
+        heading = "Claude" + (f"  ·  {plan}" if plan else "")
+        self._layout_provider_heading(layout, "claude", heading)
 
-        windows = [
-            ("Session (5h)", usage.get("five_hour")),
-            ("Weekly", usage.get("seven_day")),
-        ]
+        windows = _claude_windows(usage)
+        tray_percent: Optional[int] = None
         rendered = 0
         for label_text, window_data in windows:
-            if not isinstance(window_data, dict) or "utilization" not in window_data:
-                continue
-            layout.space(20)
-            if rendered:
-                layout.add(_Separator.alloc().init(), 1)
-                layout.space(20)
+            layout.space(WINDOW_GAP)
             window = {
                 "usedPercent": window_data.get("utilization", 0),
                 "resetsAt": _parse_claude_reset(window_data.get("resets_at")),
             }
             remaining = _remaining(window)
+            if tray_percent is None:
+                tray_percent = remaining
             self._layout_window(layout, label_text, window, remaining)
             rendered += 1
+
+        extra = usage.get("extra_usage")
+        if isinstance(extra, dict) and extra.get("is_enabled") is True:
+            used = extra.get("used_credits")
+            limit = extra.get("monthly_limit")
+            if isinstance(used, (int, float)):
+                layout.space(WINDOW_GAP)
+                self._layout_extra_usage(layout, float(used), limit)
+                rendered += 1
 
         if not rendered:
             layout.space(8)
             layout.add(
-                _make_label("No active usage windows", 11, NSFontWeightRegular, MUTED_TEXT),
+                _make_label("暂无限额窗口", 11, NSFontWeightRegular, MUTED_TEXT),
                 16,
             )
+
+        return tray_percent
+
+    def _layout_provider_heading(
+        self, layout: "_Layout", provider: str, heading: str
+    ) -> None:
+        label = _make_label(heading, 13, NSFontWeightSemibold, SECONDARY_TEXT)
+        icon = _provider_icon(provider)
+        if icon is None:
+            layout.add(label, 18)
+            return
+        icon_view = NSImageView.imageViewWithImage_(icon)
+        icon_view.setContentTintColor_(SECONDARY_TEXT)
+        layout.add_row(
+            [(icon_view, 0, 16, 16), (label, 23, layout.width - 23, 18)],
+            18,
+        )
+
+    def _layout_extra_usage(self, layout: "_Layout", used_cents: float, limit: Any) -> None:
+        """Render Claude's optional monthly extra-usage spend in dollars."""
+        name = _make_label("额外用量", 12, NSFontWeightSemibold, SUBTLE_TEXT)
+        if isinstance(limit, (int, float)) and limit > 0:
+            detail = f"${used_cents / 100:.2f} / ${float(limit) / 100:.2f}"
+            fraction = max(0.0, min(1.0, used_cents / float(limit)))
+        else:
+            detail = f"${used_cents / 100:.2f}"
+            fraction = 0.0
+
+        value = _make_label(detail, 12, NSFontWeightSemibold, PRIMARY_TEXT)
+        value.setAlignment_(NSTextAlignmentRight)
+        layout.add_row(
+            [
+                (name, 0, ROW_LABEL_WIDTH, 16),
+                (value, ROW_LABEL_WIDTH, layout.width - ROW_LABEL_WIDTH, 16),
+            ],
+            ROW_HEIGHT,
+        )
+        if fraction > 0:
+            layout.space(3)
+            bar = _RingBar.alloc().init()
+            bar.fraction = fraction
+            bar.bar_color = _bar_color(max(0, min(100, round((1 - fraction) * 100))))
+            layout.add(bar, ROW_BAR_HEIGHT)
 
     def _layout_window(
         self, layout: "_Layout", label_text: str, window: dict[str, Any], remaining: int
     ) -> None:
-        layout.add(_make_label(label_text, 12, NSFontWeightSemibold, SUBTLE_TEXT), 16)
-        layout.space(8)
-
-        percent = _make_label(f"{remaining}%", 36, NSFontWeightBold, PRIMARY_TEXT)
-        percent.setAlignment_(NSTextAlignmentCenter)
-        layout.add(percent, 44)
-        layout.space(9)
+        """One line per window: name, inline bar, percentage — then the reset
+        time as a quieter second line."""
+        name = _make_label(label_text, 12, NSFontWeightSemibold, SUBTLE_TEXT)
 
         bar = _RingBar.alloc().init()
         bar.fraction = remaining / 100.0
-        bar.bar_color = ACCENT if remaining > 50 else (WARN if remaining > 20 else DANGER)
-        layout.add(bar, 7)
-        layout.space(8)
+        bar.bar_color = _bar_color(remaining)
 
+        percent = _make_label(
+            f"{remaining}%", 13, NSFontWeightBold, PRIMARY_TEXT, NSTextAlignmentRight
+        )
+
+        bar_x = ROW_LABEL_WIDTH + ROW_BAR_GAP
+        bar_width = layout.width - ROW_PERCENT_WIDTH - ROW_BAR_GAP - bar_x
+        layout.add_row(
+            [
+                (name, 0, ROW_LABEL_WIDTH, 16),
+                (bar, bar_x, bar_width, ROW_BAR_HEIGHT),
+                (percent, layout.width - ROW_PERCENT_WIDTH, ROW_PERCENT_WIDTH, 16),
+            ],
+            ROW_HEIGHT,
+        )
+        layout.space(3)
         layout.add(
             _make_label(_short_reset(window.get("resetsAt")), 11, NSFontWeightRegular, MUTED_TEXT),
-            16,
+            RESET_HEIGHT,
         )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="以 macOS 菜单栏原生 popover 显示 Codex 剩余额度")
-    parser.add_argument("--refresh", type=float, default=30, help="刷新间隔秒数（默认 30）")
+    parser.add_argument(
+        "--refresh", type=float, default=900, help="刷新间隔秒数（默认 900，即 15 分钟）"
+    )
     parser.add_argument("--timeout", type=float, default=15, help="查询超时秒数（默认 15）")
     args = parser.parse_args()
     if args.refresh < 5:

@@ -29,23 +29,51 @@ python3 -m pip install pyobjc-framework-Cocoa
 python3 codex_quota_window.py
 ```
 
-程序启动后常驻 macOS 顶部菜单栏，以电池风格的圆环图标显示短周期剩余额度
-（环形填充比例代表剩余百分比，颜色随余量在紫色 / 黄色 / 红色间变化，鼠标悬停
-可查看具体数值）。单击菜单栏图标即可在图标正下方展开圆角深色详情面板（原生
+程序启动后常驻 macOS 顶部菜单栏，以“提供商图标 + 短周期剩余百分比”的形式并排
+显示 Codex 与 Claude，例如 `Codex 图标 72%  Claude 图标 43%`；加载时显示 `—`，
+查询失败时显示 `!`，并自动适配浅色/深色菜单栏。单击菜单栏图标即可在图标正下方
+展开圆角深色详情面板（原生
 popover，自带箭头指向图标），点击面板外部、按 Esc 或再次点击图标会自动收起；
-右键图标可退出应用。配额默认每 30 秒自动刷新，面板内也可手动刷新，也可以
-调整刷新间隔：
+右键图标可退出应用。Codex 与 Claude 的配额默认每 15 分钟一起自动刷新（这两个
+窗口本身是 5 小时 / 7 天粒度，更高的频率没有意义，还会增加撞上接口限流的概率），
+面板内也可手动刷新，也可以调整刷新间隔：
 
-面板底部还会显示 Claude Session（5 小时窗口）/ Weekly（7 天窗口）剩余额度，样式和
-Codex 部分一致。Anthropic 没有像 Codex `account/rateLimits/read` 那样的公开限额接口，
+面板底部还会显示 Claude Session（5 小时窗口）、Weekly（7 天窗口），以及账户实际
+返回的 Sonnet、Fable 和 Extra Usage，样式和 Codex 部分一致。Codex 的窗口会按返回的
+实际周期识别，因此只有 Weekly 时也不会被误标成短周期。Anthropic 没有像 Codex
+`account/rateLimits/read` 那样的公开限额接口，
 这里用的是 Claude Code 自己也在用的**非官方**接口 `GET api.anthropic.com/api/oauth/usage`：
-读取 Claude Code 写入 macOS 钥匙串（`"Claude Code-credentials"`，没有则退回读取
-`~/.claude/.credentials.json`）里的 OAuth access token 发起请求，只读不落盘、不外传、
-不做 token 刷新——token 过期后面板会提示重新运行 `claude` 登录，而不是静默续期。
+按 Claude Code 的规则优先读取 macOS 钥匙串（包括 `CLAUDE_CONFIG_DIR` 对应的条目），
+再退回读取配置目录中的 `.credentials.json`；某个来源失效时会继续尝试下一个来源。
+OAuth access token 只用于向 Anthropic 发起这一次只读请求，不落盘、不外传、不做 token
+刷新——所有来源都失效后，面板会提示重新运行 `claude` 登录，而不是静默续期。
 这个接口没有文档、可能随时变化，请知悉。
+
+每个提供商下方还会显示 **本地 Token 用量**，分别统计今天、昨天和最近 30 天：
+
+- Codex 扫描 `$CODEX_HOME`（默认 `~/.codex`）下的 `sessions/` 和
+  `archived_sessions/` JSONL 日志；按累计值计算增量，并过滤重复快照、子代理回放和
+  重复日志。
+- Claude 扫描 `$CLAUDE_CONFIG_DIR/projects`（默认 `~/.claude/projects`）以及 Claude
+  Cowork 的本地会话日志；按消息 ID 去重，避免 sidechain 回放重复计数。
+- Token 统计全部在本机完成，只读取日志，不修改日志，也不会上传日志内容。已扫描且
+  未变化的文件会在内存中复用解析结果，定时刷新不会反复解析全部历史记录。
 
 ```bash
 python3 codex_quota_window.py --refresh 60
+```
+
+### HTTP 代理
+
+点击面板右上角的 **⚙︎**，可以填写 HTTP(S) 代理，例如
+`http://127.0.0.1:7890`。保存后会立即刷新，并同时用于 Codex App Server 和 Claude
+用量接口；点击 **清除** 后恢复系统默认网络设置。代理地址保存在当前用户的 macOS
+应用偏好设置中，不会写入项目文件或日志。
+
+终端命令也可以临时指定代理：
+
+```bash
+codex-quota --proxy http://127.0.0.1:7890
 ```
 
 ## 安装为命令
@@ -67,6 +95,9 @@ codex-quota --watch 30
 
 # 禁用颜色
 codex-quota --no-color
+
+# 使用 HTTP 代理
+codex-quota --proxy http://127.0.0.1:7890
 ```
 
 运行 `codex-quota --help` 查看全部选项。

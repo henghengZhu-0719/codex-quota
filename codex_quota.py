@@ -12,7 +12,8 @@ import subprocess
 import sys
 import time
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
+from urllib.parse import urlsplit
 
 
 VERSION = "0.1.0"
@@ -20,6 +21,25 @@ VERSION = "0.1.0"
 
 class QuotaError(RuntimeError):
     """A user-facing quota query error."""
+
+
+def normalize_proxy_url(value: Any) -> Optional[str]:
+    """Validate an HTTP(S) proxy URL at the user-input boundary."""
+    if value is None or not str(value).strip():
+        return None
+    proxy = str(value).strip()
+    try:
+        parsed = urlsplit(proxy)
+        _ = parsed.port
+    except ValueError as exc:
+        raise QuotaError("代理地址中的端口无效") from exc
+    if parsed.scheme.lower() not in ("http", "https"):
+        raise QuotaError("代理地址必须以 http:// 或 https:// 开头")
+    if not parsed.hostname:
+        raise QuotaError("代理地址缺少主机名")
+    if parsed.query or parsed.fragment:
+        raise QuotaError("代理地址不能包含查询参数或片段")
+    return proxy
 
 
 def _send(proc: subprocess.Popen[str], message: dict[str, Any]) -> None:
@@ -76,10 +96,23 @@ def _wait_for_response(
     raise QuotaError(f"等待 Codex 响应超时（{timeout:g} 秒）")
 
 
-def fetch_quota(timeout: float) -> dict[str, Any]:
+def fetch_quota(timeout: float, proxy_url: Optional[str] = None) -> dict[str, Any]:
     codex = shutil.which("codex")
     if not codex:
         raise QuotaError("找不到 codex 命令，请先安装 Codex CLI")
+
+    proxy = normalize_proxy_url(proxy_url)
+    child_environment = None
+    if proxy:
+        child_environment = os.environ.copy()
+        child_environment.update(
+            {
+                "HTTP_PROXY": proxy,
+                "HTTPS_PROXY": proxy,
+                "http_proxy": proxy,
+                "https_proxy": proxy,
+            }
+        )
 
     proc = subprocess.Popen(
         [codex, "app-server", "--stdio"],
@@ -88,6 +121,7 @@ def fetch_quota(timeout: float) -> dict[str, Any]:
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
+        env=child_environment,
     )
     try:
         _send(
@@ -219,6 +253,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--json", action="store_true", help="输出原始 JSON，方便脚本处理")
     parser.add_argument("--watch", type=float, metavar="SECONDS", help="按指定秒数持续刷新")
     parser.add_argument("--timeout", type=float, default=15, help="单次查询超时秒数（默认 15）")
+    parser.add_argument("--proxy", help="HTTP(S) 代理地址，例如 http://127.0.0.1:7890")
     parser.add_argument("--no-color", action="store_true", help="禁用 ANSI 颜色")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     args = parser.parse_args()
@@ -234,7 +269,7 @@ def main() -> int:
     use_color = not args.no_color and sys.stdout.isatty() and not os.getenv("NO_COLOR")
     try:
         while True:
-            payload = fetch_quota(args.timeout)
+            payload = fetch_quota(args.timeout, args.proxy)
             if args.watch is not None and sys.stdout.isatty():
                 print("\033[2J\033[H", end="")
             if args.json:
