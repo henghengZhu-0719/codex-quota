@@ -4,8 +4,6 @@ Version: 0.1.0
 Summary: Show the remaining Codex rate-limit allowance in your terminal
 License: MIT
 Requires-Python: >=3.9
-Requires-Dist: PySide6-Essentials>=6.6
-Provides-Extra: macos
-Requires-Dist: pyobjc-framework-Cocoa>=10; sys_platform == "darwin" and extra == "macos"
+Requires-Dist: pyobjc-framework-Cocoa>=10; sys_platform == "darwin"
 Provides-Extra: build
 Requires-Dist: pyinstaller>=6; extra == "build"
