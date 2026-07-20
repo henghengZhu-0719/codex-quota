@@ -19,7 +19,7 @@ import objc
 try:
     from AppKit import (
         NSAppearance,
-        NSAppearanceNameDarkAqua,
+        NSAppearanceNameAqua,
         NSApplication,
         NSApplicationActivationPolicyAccessory,
         NSApp,
@@ -47,6 +47,8 @@ try:
         NSVariableStatusItemLength,
         NSView,
         NSViewController,
+        NSViewHeightSizable,
+        NSViewWidthSizable,
         NSVisualEffectBlendingModeBehindWindow,
         NSVisualEffectMaterialPopover,
         NSVisualEffectStateActive,
@@ -188,13 +190,13 @@ ACCENT = _rgba(0x9B, 0x7B, 0xFF)
 WARN = _rgba(0xF5, 0xC4, 0x51)
 DANGER = _rgba(0xFF, 0x62, 0x59)
 ERROR_TEXT = _rgba(0xFF, 0x8A, 0x80)
-PRIMARY_TEXT = NSColor.whiteColor()
-SECONDARY_TEXT = NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.85)
-SUBTLE_TEXT = NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.7)
-MUTED_TEXT = NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.48)
-TRACK_COLOR = NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.14)
-SEPARATOR_COLOR = NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.1)
-BAR_TRACK_COLOR = NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.12)
+PRIMARY_TEXT = NSColor.blackColor()
+SECONDARY_TEXT = NSColor.colorWithCalibratedWhite_alpha_(0.0, 0.85)
+SUBTLE_TEXT = NSColor.colorWithCalibratedWhite_alpha_(0.0, 0.7)
+MUTED_TEXT = NSColor.colorWithCalibratedWhite_alpha_(0.0, 0.48)
+TRACK_COLOR = NSColor.colorWithCalibratedWhite_alpha_(0.0, 0.14)
+SEPARATOR_COLOR = NSColor.colorWithCalibratedWhite_alpha_(0.0, 0.1)
+BAR_TRACK_COLOR = NSColor.colorWithCalibratedWhite_alpha_(0.0, 0.12)
 
 CARD_WIDTH = 320
 MARGIN_X = 22
@@ -420,7 +422,15 @@ class QuotaMenuBarApp(NSObject):
         effect_view.setMaterial_(NSVisualEffectMaterialPopover)
         effect_view.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
         effect_view.setState_(NSVisualEffectStateActive)
-        effect_view.setAppearance_(NSAppearance.appearanceNamed_(NSAppearanceNameDarkAqua))
+        effect_view.setAppearance_(NSAppearance.appearanceNamed_(NSAppearanceNameAqua))
+        # Apple-sanctioned vibrancy boost (no shape/layer of its own, so it
+        # can't reintroduce the double-rounded-corner issue).
+        effect_view.setEmphasized_(True)
+        # The popover resizes its content view when setContentSize_ grows the
+        # card (loading state -> full quota list); without this the backdrop
+        # keeps its old frame and the newly exposed strip renders as the
+        # popover's plain window background instead of the vibrancy material.
+        effect_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
 
         dot = _make_label("●", 17, NSFontWeightRegular, ACCENT)
         dot.setFrame_(NSMakeRect(MARGIN_X, TOP_PAD, 16, HEADER_HEIGHT))
@@ -462,7 +472,7 @@ class QuotaMenuBarApp(NSObject):
         # and reliable.
         popover.setAnimates_(False)
         popover.setContentViewController_(view_controller)
-        popover.setAppearance_(NSAppearance.appearanceNamed_(NSAppearanceNameDarkAqua))
+        popover.setAppearance_(NSAppearance.appearanceNamed_(NSAppearanceNameAqua))
         popover.setDelegate_(self)
         effect_view.owner_popover = popover
 
@@ -572,11 +582,18 @@ class QuotaMenuBarApp(NSObject):
             self.body_view.addSubview_(view)
         body_height = max(layout.y, 40)
         total_height = TOP_PAD + HEADER_HEIGHT + 12 + body_height + BOTTOM_PAD
-        self.effect_view.setFrame_(NSMakeRect(0, 0, CARD_WIDTH, total_height))
+        # Only drive the popover's content size — never the effect view's own
+        # frame. The popover positions its content view inside a frame view
+        # that also carries the arrow and rounded chrome, so that frame has a
+        # non-zero origin; pinning it to (0, 0) shifts the whole card down-left
+        # and leaves an uncovered strip showing the bare window background.
+        # The autoresizing mask set in _build_popover keeps the backdrop
+        # filling whatever frame the popover hands it.
+        self.popover.setContentSize_(NSMakeSize(CARD_WIDTH, total_height))
         self.body_view.setFrame_(
             NSMakeRect(0, TOP_PAD + HEADER_HEIGHT + 12, CARD_WIDTH, body_height)
         )
-        self.popover.setContentSize_(NSMakeSize(CARD_WIDTH, total_height))
+        self.effect_view.setNeedsDisplay_(True)
 
     def _render_loading(self) -> None:
         self._clear_body()
