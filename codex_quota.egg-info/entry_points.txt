@@ -1,0 +1,3 @@
+[console_scripts]
+codex-quota = codex_quota:main
+codex-quota-window = codex_quota_window:main

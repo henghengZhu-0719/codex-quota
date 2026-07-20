@@ -1,0 +1,10 @@
+README.md
+codex_quota.py
+codex_quota_window.py
+pyproject.toml
+codex_quota.egg-info/PKG-INFO
+codex_quota.egg-info/SOURCES.txt
+codex_quota.egg-info/dependency_links.txt
+codex_quota.egg-info/entry_points.txt
+codex_quota.egg-info/requires.txt
+codex_quota.egg-info/top_level.txt

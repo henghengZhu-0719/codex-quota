@@ -1,0 +1,9 @@
+PySide6-Essentials>=6.6
+
+[build]
+pyinstaller>=6
+
+[macos]
+
+[macos:sys_platform == "darwin"]
+pyobjc-framework-Cocoa>=10

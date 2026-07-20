@@ -1,0 +1,100 @@
+# codex-quota
+
+在终端查询当前 Codex 登录账户的剩余额度。工具通过本机 `codex app-server`
+调用 `account/rateLimits/read`，不会读取、打印或保存登录凭据。
+
+## 要求
+
+- Python 3.9+
+- 已安装 Codex CLI
+- 已通过 `codex login` 登录 ChatGPT 账户
+- 菜单栏面板（`codex_quota_window.py`）仅支持 macOS，依赖 PyObjC
+- 可选：已通过 `claude` 登录 Claude Code，用于显示 Claude Session/Weekly 剩余额度；
+  未登录时面板里会显示对应的查询失败提示，不影响 Codex 部分正常工作
+
+## 直接运行
+
+```bash
+python3 codex_quota.py
+```
+
+## 菜单栏面板
+
+基于 `NSStatusItem` + `NSPopover` 原生实现（PyObjC/AppKit），不是第三方 GUI 框架
+模拟出来的窗口，定位、圆角、阴影都由 macOS 系统直接处理（面板开合做成了瞬时
+无动画，规避了脚本化启动场景下 `NSPopover` 关闭动画偶发卡死的问题，交互上更可靠）。
+
+```bash
+python3 -m pip install pyobjc-framework-Cocoa
+python3 codex_quota_window.py
+```
+
+程序启动后常驻 macOS 顶部菜单栏，以电池风格的圆环图标显示短周期剩余额度
+（环形填充比例代表剩余百分比，颜色随余量在紫色 / 黄色 / 红色间变化，鼠标悬停
+可查看具体数值）。单击菜单栏图标即可在图标正下方展开圆角深色详情面板（原生
+popover，自带箭头指向图标），点击面板外部、按 Esc 或再次点击图标会自动收起；
+右键图标可退出应用。配额默认每 30 秒自动刷新，面板内也可手动刷新，也可以
+调整刷新间隔：
+
+面板底部还会显示 Claude Session（5 小时窗口）/ Weekly（7 天窗口）剩余额度，样式和
+Codex 部分一致。Anthropic 没有像 Codex `account/rateLimits/read` 那样的公开限额接口，
+这里用的是 Claude Code 自己也在用的**非官方**接口 `GET api.anthropic.com/api/oauth/usage`：
+读取 Claude Code 写入 macOS 钥匙串（`"Claude Code-credentials"`，没有则退回读取
+`~/.claude/.credentials.json`）里的 OAuth access token 发起请求，只读不落盘、不外传、
+不做 token 刷新——token 过期后面板会提示重新运行 `claude` 登录，而不是静默续期。
+这个接口没有文档、可能随时变化，请知悉。
+
+```bash
+python3 codex_quota_window.py --refresh 60
+```
+
+## 安装为命令
+
+```bash
+python3 -m pip install -e .
+codex-quota
+codex-quota-window
+```
+
+## 常用选项
+
+```bash
+# 输出原始 JSON
+codex-quota --json
+
+# 每 30 秒刷新
+codex-quota --watch 30
+
+# 禁用颜色
+codex-quota --no-color
+```
+
+运行 `codex-quota --help` 查看全部选项。
+
+## 打包 macOS App
+
+将应用图标放到 `assets/codex.icns` 或项目根目录的 `codex.icns`（没有图标时也可以
+构建，只是使用默认图标），
+然后运行：
+
+```bash
+python3 -m pip install -e '.[build]'
+pyinstaller --noconfirm --clean CodexQuota.spec
+```
+
+生成的应用位于 `dist/CodexQuota.app`。构建配置已加入 `LSUIElement`，因此应用只在
+顶部菜单栏常驻，不会同时占用 Dock。入口是 `codex_quota_window.py`，不是 `main.py`。
+
+`.spec` 里已经为 `AppKit`、`Foundation`、`objc`、`PyObjCTools.AppHelper` 显式加了
+`hiddenimports`；PyInstaller 打包 PyObjC 应用偶尔仍需按报错信息追加隐藏依赖，构建
+完成后请实际打开 `dist/CodexQuota.app` 验证菜单栏图标和面板能正常工作。
+
+## 说明
+
+- “剩余百分比”按 Codex 返回的 `usedPercent` 计算。
+- 重置时间会转换为本机时区，并显示距离重置的大致时长。
+- App Server 当前在 Codex CLI 中标记为 experimental，升级 CLI 后如协议发生变化，
+  可能需要同步调整本工具。
+- Claude 用量查询的接口/凭据读取方式参考了开源项目
+  [robinebers/openusage](https://github.com/robinebers/openusage)（`docs/providers/claude.md`）
+  的公开实现；同样属于非官方接口，Anthropic 调整后可能需要同步更新。

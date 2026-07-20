@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-quota"
+version = "0.1.0"
+description = "Show the remaining Codex rate-limit allowance in your terminal"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = ["pyobjc-framework-Cocoa>=10; sys_platform == 'darwin'"]
+
+[project.optional-dependencies]
+build = ["pyinstaller>=6"]
+
+[project.scripts]
+codex-quota = "codex_quota:main"
+codex-quota-window = "codex_quota_window:main"
+
+[tool.setuptools]
+py-modules = ["codex_quota", "codex_quota_window"]
