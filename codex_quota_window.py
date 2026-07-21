@@ -81,7 +81,7 @@ except ImportError as exc:  # pragma: no cover - depends on the desktop environm
     ) from exc
 
 from codex_quota import QuotaError, _snapshots, fetch_quota, normalize_proxy_url
-from token_usage import TokenTotals, scan_token_usage
+from token_usage import DailyTokenUsage, TokenTotals, scan_token_usage
 
 
 def _resource_path(*parts: str) -> Path:
@@ -302,6 +302,8 @@ ROW_BAR_GAP = 10
 ROW_BAR_HEIGHT = 6
 RESET_HEIGHT = 14
 WINDOW_GAP = 10
+DAILY_CHART_HEIGHT = 58
+DAILY_CHART_ANIMATION_SECONDS = 0.55
 
 
 def _remaining(window: dict[str, Any]) -> int:
@@ -541,6 +543,168 @@ class _Separator(_FlippedView):
     def drawRect_(self, rect) -> None:
         SEPARATOR_COLOR.setFill()
         NSBezierPath.fillRect_(self.bounds())
+
+
+class _DailyTokenChart(_FlippedView):
+    """Scrollable daily token chart showing seven days at a time."""
+
+    visible_bar_count = 7
+
+    def maximumScrollOffset(self) -> float:
+        points = getattr(self, "points", [])
+        if len(points) <= self.visible_bar_count:
+            return 0.0
+        slot_width = self.bounds().size.width / self.visible_bar_count
+        return (len(points) - self.visible_bar_count) * slot_width
+
+    def showLatest(self) -> None:
+        self.scroll_offset = self.maximumScrollOffset()
+        self.updateToolTips()
+        self.setNeedsDisplay_(True)
+
+    def updateToolTips(self) -> None:
+        self.removeAllToolTips()
+        self.tooltip_points = {}
+        points = getattr(self, "points", [])
+        if not points or self.bounds().size.width <= 0:
+            return
+        width = self.bounds().size.width
+        slot_width = width / self.visible_bar_count
+        scroll_offset = getattr(self, "scroll_offset", 0.0)
+        for index, point in enumerate(points):
+            slot_x = index * slot_width - scroll_offset
+            left = max(0.0, slot_x)
+            right = min(width, slot_x + slot_width)
+            if right <= left:
+                continue
+            tag = self.addToolTipRect_owner_userData_(
+                NSMakeRect(left, 0, right - left, self.bounds().size.height),
+                self,
+                None,
+            )
+            self.tooltip_points[int(tag)] = point
+
+    def view_stringForToolTip_point_userData_(
+        self, view, tag, point, user_data
+    ) -> str:
+        usage = getattr(self, "tooltip_points", {}).get(int(tag))
+        if usage is None:
+            return ""
+        return f"{usage.day:%Y-%m-%d}  {_format_token_count(usage.total_tokens)}"
+
+    def scrollWheel_(self, event) -> None:
+        delta = event.scrollingDeltaX()
+        if abs(delta) < 0.01:
+            objc.super(_DailyTokenChart, self).scrollWheel_(event)
+            return
+        current = getattr(self, "scroll_offset", 0.0)
+        self.scroll_offset = max(
+            0.0, min(self.maximumScrollOffset(), current + delta)
+        )
+        self.updateToolTips()
+        self.setNeedsDisplay_(True)
+
+    def startAnimation(self) -> None:
+        timer = getattr(self, "animation_timer", None)
+        if timer is not None:
+            timer.invalidate()
+        self.animation_progress = 0.0
+        self.animation_started_at = time.monotonic()
+        self.animation_timer = (
+            NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                1.0 / 60.0, self, "animationTimerFired:", None, True
+            )
+        )
+        self.setNeedsDisplay_(True)
+
+    def animationTimerFired_(self, timer) -> None:
+        elapsed = time.monotonic() - self.animation_started_at
+        self.animation_progress = min(
+            1.0, elapsed / DAILY_CHART_ANIMATION_SECONDS
+        )
+        self.setNeedsDisplay_(True)
+        if self.animation_progress >= 1.0:
+            timer.invalidate()
+            self.animation_timer = None
+
+    def drawRect_(self, rect) -> None:
+        points = getattr(self, "points", [])
+        if not points:
+            return
+
+        bounds = self.bounds()
+        label_height = 15.0
+        chart_top = 3.0
+        chart_height = max(1.0, bounds.size.height - label_height - chart_top - 3.0)
+        slot_width = bounds.size.width / self.visible_bar_count
+        bar_width = min(18.0, max(6.0, slot_width - 9.0))
+        scroll_offset = getattr(self, "scroll_offset", 0.0)
+        first_visible = max(0, int(scroll_offset // slot_width))
+        visible_points = points[
+            first_visible : min(len(points), first_visible + self.visible_bar_count + 1)
+        ]
+        maximum = max((point.total_tokens for point in visible_points), default=0)
+        animation_progress = getattr(self, "animation_progress", 1.0)
+        label_font = NSFont.monospacedDigitSystemFontOfSize_weight_(9, NSFontWeightRegular)
+        label_attributes = {
+            NSFontAttributeName: label_font,
+            NSForegroundColorAttributeName: MUTED_TEXT,
+        }
+
+        for index, point in enumerate(points):
+            slot_x = index * slot_width - scroll_offset
+            if slot_x + slot_width < 0 or slot_x > bounds.size.width:
+                continue
+            x = slot_x + (slot_width - bar_width) / 2
+            track_rect = NSMakeRect(x, chart_top, bar_width, chart_height)
+            radius = min(3.0, bar_width / 2)
+            track = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                track_rect, radius, radius
+            )
+            BAR_TRACK_COLOR.setFill()
+            track.fill()
+
+            if point.total_tokens > 0 and maximum > 0:
+                # Stagger the bars from left to right, then ease each one out.
+                bar_progress = max(
+                    0.0,
+                    min(
+                        1.0,
+                        animation_progress * 1.3
+                        - max(0, index - first_visible) * 0.05,
+                    ),
+                )
+                eased_progress = 1.0 - (1.0 - bar_progress) ** 3
+                target_height = chart_height * point.total_tokens / maximum
+                height = max(1.0, target_height * eased_progress)
+                fill_rect = NSMakeRect(
+                    x, chart_top + chart_height - height, bar_width, height
+                )
+                fill_radius = min(radius, height / 2)
+                fill = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                    fill_rect, fill_radius, fill_radius
+                )
+                color = ACCENT.colorWithAlphaComponent_(
+                    1.0 if index == len(points) - 1 else 0.62
+                )
+                color.setFill()
+                fill.fill()
+
+            if index == len(points) - 1:
+                day_label = "今天"
+            elif point.day.day == 1:
+                day_label = f"{point.day.month}/1"
+            else:
+                day_label = str(point.day.day)
+            text = NSString.stringWithString_(day_label)
+            text_size = text.sizeWithAttributes_(label_attributes)
+            text.drawAtPoint_withAttributes_(
+                NSMakePoint(
+                    slot_x + (slot_width - text_size.width) / 2,
+                    chart_top + chart_height + 3.0,
+                ),
+                label_attributes,
+            )
 
 
 def _make_label(
@@ -827,7 +991,7 @@ class QuotaMenuBarApp(NSObject):
         except (ClaudeStatusError, OSError) as exc:
             claude_error = str(exc)
 
-        token_usage: Optional[dict[str, dict[str, TokenTotals]]] = None
+        token_usage: Optional[dict[str, dict[str, Any]]] = None
         try:
             token_usage = scan_token_usage()
         except OSError:
@@ -850,7 +1014,7 @@ class QuotaMenuBarApp(NSObject):
         codex_error: Optional[str],
         claude_usage: Optional[dict[str, Any]],
         claude_error: Optional[str],
-        token_usage: Optional[dict[str, dict[str, TokenTotals]]],
+        token_usage: Optional[dict[str, dict[str, Any]]],
     ) -> None:
         self._render_status(
             codex_payload, codex_error, claude_usage, claude_error, token_usage
@@ -903,7 +1067,7 @@ class QuotaMenuBarApp(NSObject):
         codex_error: Optional[str],
         claude_usage: Optional[dict[str, Any]],
         claude_error: Optional[str],
-        token_usage: Optional[dict[str, dict[str, TokenTotals]]],
+        token_usage: Optional[dict[str, dict[str, Any]]],
     ) -> None:
         layout = _Layout(MARGIN_X, CARD_WIDTH - 2 * MARGIN_X, 0)
 
@@ -1016,7 +1180,7 @@ class QuotaMenuBarApp(NSObject):
         return tray_percent
 
     def _layout_token_usage(
-        self, layout: "_Layout", periods: Optional[dict[str, TokenTotals]]
+        self, layout: "_Layout", periods: Optional[dict[str, Any]]
     ) -> None:
         layout.add(_make_label("本地 Token 用量", 11, NSFontWeightSemibold, MUTED_TEXT), 16)
         if periods is None:
@@ -1052,6 +1216,26 @@ class QuotaMenuBarApp(NSObject):
                 ],
                 18,
             )
+
+        daily = periods.get("daily")
+        if isinstance(daily, list) and daily:
+            chart = _DailyTokenChart.alloc().init()
+            chart.points = [
+                point for point in daily if isinstance(point, DailyTokenUsage)
+            ]
+            if chart.points:
+                hint = _make_label(
+                    "← 左右滑动查看最近 30 天 →",
+                    9,
+                    NSFontWeightRegular,
+                    MUTED_TEXT,
+                    NSTextAlignmentRight,
+                )
+                layout.space(5)
+                layout.add(hint, 13)
+                layout.add(chart, DAILY_CHART_HEIGHT)
+                chart.showLatest()
+                chart.startAnimation()
 
     def _layout_claude_usage(
         self,

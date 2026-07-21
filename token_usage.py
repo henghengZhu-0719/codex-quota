@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
@@ -39,6 +39,12 @@ class TokenTotals:
         self.output_tokens += event.output_tokens
         self.reasoning_tokens += event.reasoning_tokens
         self.total_tokens += event.total_tokens
+
+
+@dataclass(frozen=True)
+class DailyTokenUsage:
+    day: date
+    total_tokens: int = 0
 
 
 _FileSignature = tuple[int, int]
@@ -399,26 +405,33 @@ def _dedup_claude(events: Iterable[TokenEvent]) -> list[TokenEvent]:
     return list(chosen.values())
 
 
-def _periods(events: Iterable[TokenEvent], now: Optional[datetime] = None) -> dict[str, TokenTotals]:
+def _periods(events: Iterable[TokenEvent], now: Optional[datetime] = None) -> dict[str, Any]:
     local_now = (now or datetime.now().astimezone()).astimezone()
     today = local_now.date()
     yesterday = today - timedelta(days=1)
     first_day = today - timedelta(days=29)
     result = {"today": TokenTotals(), "yesterday": TokenTotals(), "last30": TokenTotals()}
+    daily_totals = {today - timedelta(days=offset): 0 for offset in range(30)}
     for event in events:
         day = event.timestamp.astimezone().date()
         if day < first_day or day > today:
             continue
         result["last30"].add(event)
+        if day in daily_totals:
+            daily_totals[day] += event.total_tokens
         if day == today:
             result["today"].add(event)
         elif day == yesterday:
             result["yesterday"].add(event)
+    result["daily"] = [
+        DailyTokenUsage(day=day, total_tokens=daily_totals[day])
+        for day in sorted(daily_totals)
+    ]
     return result
 
 
-def scan_token_usage(now: Optional[datetime] = None) -> dict[str, dict[str, TokenTotals]]:
-    """Return Today, Yesterday and Last 30 Days totals for both providers."""
+def scan_token_usage(now: Optional[datetime] = None) -> dict[str, dict[str, Any]]:
+    """Return summary totals and a seven-day daily series for both providers."""
     codex_events = [event for path in _codex_files() for event in _cached_events(path, parse_codex_file)]
     codex_unique = {event.identity: event for event in codex_events}.values()
 

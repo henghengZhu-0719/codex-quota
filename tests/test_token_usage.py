@@ -138,3 +138,7 @@ def test_periods_bucket_tokens_by_local_calendar_day(tmp_path):
     assert periods["today"].total_tokens == 100
     assert periods["yesterday"].total_tokens == 50
     assert periods["last30"].total_tokens == 150
+    assert len(periods["daily"]) == 30
+    assert periods["daily"][0].day.isoformat() == "2026-06-21"
+    assert [point.total_tokens for point in periods["daily"][-2:]] == [50, 100]
+    assert periods["daily"][-1].day.isoformat() == "2026-07-20"
