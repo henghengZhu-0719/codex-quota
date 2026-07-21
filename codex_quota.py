@@ -135,7 +135,7 @@ def render(payload: dict[str, Any], color: bool) -> str:
             rows.append(_color(f"  当前受限：{reached}", "31", color))
 
     reset_credits = payload.get("rateLimitResetCredits")
-    if isinstance(reset_credits, dict) and reset_credits.get("availableCount", 0):
+    if isinstance(reset_credits, dict) and "availableCount" in reset_credits:
         rows.append(f"\n可用限额重置次数：{reset_credits['availableCount']}")
     rows.append(f"\n查询时间：{datetime.now().astimezone():%Y-%m-%d %H:%M:%S %Z}")
     return "\n".join(rows)

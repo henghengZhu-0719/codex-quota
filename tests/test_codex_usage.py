@@ -2,6 +2,7 @@ import json
 from unittest.mock import patch
 
 import codex_usage
+from codex_quota import render
 
 
 def test_auth_file_is_enough_without_codex_executable(tmp_path):
@@ -41,6 +42,7 @@ def test_usage_response_is_normalized_for_existing_quota_ui():
                 }
             },
             "credits": {"has_credits": True, "balance": 12.5},
+            "rate_limit_reset_credits": {"available_count": 3},
         },
         {},
     )
@@ -53,6 +55,19 @@ def test_usage_response_is_normalized_for_existing_quota_ui():
         "resetsAt": 2_000_000_000,
     }
     assert snapshot["credits"]["balance"] == 12.5
+    assert payload["rateLimitResetCredits"]["availableCount"] == 3
+
+
+def test_terminal_renders_zero_available_resets():
+    output = render(
+        {
+            "rateLimits": {"limitName": "Codex"},
+            "rateLimitResetCredits": {"availableCount": 0},
+        },
+        color=False,
+    )
+
+    assert "可用限额重置次数：0" in output
 
 
 def test_direct_usage_request_sends_account_header_without_launching_codex():

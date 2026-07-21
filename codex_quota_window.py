@@ -1177,6 +1177,27 @@ class QuotaMenuBarApp(NSObject):
                     16,
                 )
 
+        reset_credits = payload.get("rateLimitResetCredits")
+        if isinstance(reset_credits, dict):
+            available = reset_credits.get("availableCount")
+            if isinstance(available, (int, float)) and not isinstance(available, bool):
+                layout.space(10)
+                label = _make_label("可用限额重置", 11, NSFontWeightRegular, SUBTLE_TEXT)
+                value = _make_label(
+                    f"{max(0, int(available))} 次",
+                    11,
+                    NSFontWeightSemibold,
+                    SECONDARY_TEXT,
+                    NSTextAlignmentRight,
+                )
+                layout.add_row(
+                    [
+                        (label, 0, ROW_LABEL_WIDTH, 16),
+                        (value, ROW_LABEL_WIDTH, layout.width - ROW_LABEL_WIDTH, 16),
+                    ],
+                    18,
+                )
+
         return tray_percent
 
     def _layout_token_usage(
@@ -1201,9 +1222,10 @@ class QuotaMenuBarApp(NSObject):
 
         for label_text, total in rows:
             count = total.total_tokens if total else 0
+            calls = total.calls if total else 0
             label = _make_label(label_text, 11, NSFontWeightRegular, SUBTLE_TEXT)
             value = _make_label(
-                _format_token_count(count),
+                f"{calls} 次调用  ·  {_format_token_count(count)}",
                 11,
                 NSFontWeightSemibold,
                 SECONDARY_TEXT,

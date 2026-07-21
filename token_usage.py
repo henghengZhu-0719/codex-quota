@@ -25,6 +25,7 @@ class TokenEvent:
 
 @dataclass
 class TokenTotals:
+    calls: int = 0
     input_tokens: int = 0
     cached_tokens: int = 0
     cache_write_tokens: int = 0
@@ -33,6 +34,7 @@ class TokenTotals:
     total_tokens: int = 0
 
     def add(self, event: TokenEvent) -> None:
+        self.calls += 1
         self.input_tokens += event.input_tokens
         self.cached_tokens += event.cached_tokens
         self.cache_write_tokens += event.cache_write_tokens
