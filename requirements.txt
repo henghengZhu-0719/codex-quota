@@ -1,0 +1,5 @@
+# Build dependency used by both packaging scripts.
+pyinstaller>=6
+
+# The menu-bar application is macOS-only. pip skips this dependency on Windows.
+pyobjc-framework-Cocoa>=10; sys_platform == "darwin"

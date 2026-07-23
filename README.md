@@ -1,5 +1,46 @@
 # codex-quota
 
+## 一键打包
+
+打包脚本会创建独立的构建虚拟环境，自动安装 `requirements.txt` 中的依赖，
+然后清理并重新生成安装包。PyInstaller 不支持跨平台打包，请在对应操作系统上运行。
+
+### macOS
+
+在项目目录运行：
+
+```bash
+chmod +x build_macos.sh
+./build_macos.sh
+```
+
+生成文件：`dist/CodexQuota.app`
+
+脚本使用 `CodexQuota.spec` 打包 macOS 菜单栏应用。应用只在顶部菜单栏常驻，
+不会同时占用 Dock。构建环境位于 `.build-venv-macos`。
+
+### Windows
+
+在 Windows 上直接双击 `build_windows.bat`，也可以在 `cmd` 中运行：
+
+```bat
+build_windows.bat
+```
+
+生成文件：`dist\codex-quota.exe`
+
+脚本使用 `CodexQuotaWindows.spec` 打包终端版程序，构建环境位于
+`.build-venv-windows`。当前图形面板基于 macOS AppKit，因此 Windows 产物不包含
+菜单栏图形界面，可在 PowerShell 或 `cmd` 中使用：
+
+```powershell
+.\dist\codex-quota.exe --help
+.\dist\codex-quota.exe --json
+```
+
+如需自定义 macOS 图标，请将图标放在 `assets/codex.icns`；没有图标也可以构建，
+此时使用默认图标。
+
 在终端或 macOS 菜单栏查询当前 Codex、Claude 登录账户的剩余额度。Codex 部分采用
 与 OpenUsage 相同的方式：读取 Codex 已保存的 OAuth 登录，直接请求
 `https://chatgpt.com/backend-api/wham/usage`，不需要启动 Codex App 或
@@ -105,24 +146,6 @@ codex-quota --proxy http://127.0.0.1:7890
 ```
 
 运行 `codex-quota --help` 查看全部选项。
-
-## 打包 macOS App
-
-将应用图标放到 `assets/codex.icns` 或项目根目录的 `codex.icns`（没有图标时也可以
-构建，只是使用默认图标），
-然后运行：
-
-```bash
-python3 -m pip install -e '.[build]'
-pyinstaller --noconfirm --clean CodexQuota.spec
-```
-
-生成的应用位于 `dist/CodexQuota.app`。构建配置已加入 `LSUIElement`，因此应用只在
-顶部菜单栏常驻，不会同时占用 Dock。入口是 `codex_quota_window.py`，不是 `main.py`。
-
-`.spec` 里已经为 `AppKit`、`Foundation`、`objc`、`PyObjCTools.AppHelper` 显式加了
-`hiddenimports`；PyInstaller 打包 PyObjC 应用偶尔仍需按报错信息追加隐藏依赖，构建
-完成后请实际打开 `dist/CodexQuota.app` 验证菜单栏图标和面板能正常工作。
 
 ## 说明
 
