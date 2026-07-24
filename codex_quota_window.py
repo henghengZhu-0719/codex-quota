@@ -765,7 +765,7 @@ class QuotaMenuBarApp(NSObject):
         self = objc.super(QuotaMenuBarApp, self).init()
         if self is None:
             return None
-        self.refresh_seconds = options["refresh"]
+        self.refresh_seconds = 1200
         self.timeout = options["timeout"]
         self.status_item = None
         self.popover = None

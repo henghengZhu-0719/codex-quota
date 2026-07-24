@@ -1,5 +1,77 @@
 # codex-quota
 
+在终端或 macOS 菜单栏查询 Codex、Claude 登录账户的剩余额度与本地 Token 用量。
+
+## 项目架构
+
+项目按「数据采集 → 展示 → 打包」三层组织,核心逻辑不依赖任何 GUI 框架,
+菜单栏面板只是数据层之上的一个 macOS 原生前端。
+
+### 分层与模块职责
+
+| 模块 | 层 | 职责 |
+|------|-----|------|
+| [codex_usage.py](codex_usage.py) | 数据采集 | Codex 用量底层实现:读取本地 OAuth(`auth.json`/钥匙串)、按需刷新 Token 并写回、请求 `chatgpt.com/backend-api/wham/usage`,并把响应归一化为统一的窗口结构 |
+| [codex_quota.py](codex_quota.py) | 数据采集 + 终端 UI | Codex 的对外封装与命令行入口:代理校验(`normalize_proxy_url`)、`fetch_quota`、快照解析(`_snapshots`),以及带颜色进度条的终端渲染 |
+| [token_usage.py](token_usage.py) | 数据采集 | 纯本地 Token 计量:扫描 Codex/Claude 的 JSONL 会话日志,解析用量事件、去重(增量/子代理回放/消息 ID),按今天/昨天/最近 30 天汇总并生成每日序列 |
+| [codex_quota_window.py](codex_quota_window.py) | 展示(macOS) | 菜单栏面板:`NSStatusItem` + `NSPopover` 原生实现;内含 Claude 用量查询(`fetch_claude_usage`)、托盘图标绘制、popover 布局与本地 Token 柱状图 |
+
+三个数据采集模块(`codex_usage`、`codex_quota`、`token_usage`)是纯 Python、跨平台的;
+只有 `codex_quota_window` 依赖 PyObjC/AppKit,仅限 macOS。因此终端版可在 Windows 上打包运行。
+
+### 依赖关系与数据流
+
+```mermaid
+flowchart TD
+    subgraph 展示层
+        W["codex_quota_window.py<br/>菜单栏面板 (macOS)"]
+        CLI["codex_quota.py<br/>终端 CLI"]
+    end
+    subgraph 数据采集层
+        CU["codex_usage.py<br/>Codex 用量接口"]
+        CQ["codex_quota.py<br/>Codex 封装 / 代理校验"]
+        TU["token_usage.py<br/>本地 Token 统计"]
+        CLAUDE["fetch_claude_usage()<br/>Claude 用量接口"]
+    end
+    subgraph 外部数据源
+        API1["chatgpt.com<br/>wham/usage"]
+        API2["api.anthropic.com<br/>oauth/usage（非官方）"]
+        LOG["本地 JSONL 日志<br/>~/.codex · ~/.claude"]
+    end
+
+    CLI --> CQ
+    W --> CQ
+    W --> CLAUDE
+    W --> TU
+    CQ --> CU --> API1
+    CLAUDE --> API2
+    TU --> LOG
+```
+
+菜单栏面板每 20 分钟(可调)触发一次刷新:在后台线程并行拉取 Codex 配额、Claude
+配额与本地 Token 用量,再回到主线程渲染 popover 并更新托盘图标,避免网络请求阻塞
+UI。凭据只用于当次只读请求,统计与解析全部在本机完成。
+
+### 目录结构
+
+```
+codex-quota/
+├── codex_usage.py            # Codex 用量接口 + OAuth 读取/刷新
+├── codex_quota.py            # Codex 封装 + 终端 CLI(codex-quota)
+├── token_usage.py            # 本地 Codex/Claude Token 统计
+├── codex_quota_window.py     # macOS 菜单栏面板(codex-quota-window)
+├── assets/
+│   ├── codex.icns            # macOS 应用图标
+│   └── provider-icons/       # 托盘 Codex/Claude 模板图标(SVG)
+├── tests/                    # 各数据模块的单元测试
+├── CodexQuota.spec           # PyInstaller 配置(macOS .app)
+├── CodexQuotaWindows.spec    # PyInstaller 配置(Windows .exe)
+├── build_macos.sh            # macOS 一键打包脚本
+├── build_windows.bat         # Windows 一键打包脚本
+├── pyproject.toml            # 包元数据与命令入口
+└── requirements.txt          # 打包依赖
+```
+
 ## 一键打包
 
 打包脚本会创建独立的构建虚拟环境，自动安装 `requirements.txt` 中的依赖，
