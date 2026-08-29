@@ -54,7 +54,9 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # 不能开 UPX：压缩后的二进制在 macOS(尤其 Apple Silicon)上会破坏
+    # code signature，导致 ad-hoc 签名失效、系统以「已损坏」拒绝启动。
+    upx=False,
     console=False,
 )
 
@@ -63,7 +65,7 @@ collection = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     name="CodexQuota",
 )
 
