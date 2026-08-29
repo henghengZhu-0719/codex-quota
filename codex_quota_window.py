@@ -81,6 +81,7 @@ except ImportError as exc:  # pragma: no cover - depends on the desktop environm
     ) from exc
 
 from codex_quota import QuotaError, _snapshots, fetch_quota, normalize_proxy_url
+from codex_usage import ssl_context
 from token_usage import DailyTokenUsage, TokenTotals, scan_token_usage
 
 
@@ -203,11 +204,10 @@ def fetch_claude_usage(
     """
     candidates = _read_claude_oauth_candidates()
     proxy = normalize_proxy_url(proxy_url)
-    opener = None
+    handlers: list[Any] = [urllib.request.HTTPSHandler(context=ssl_context())]
     if proxy:
-        opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({"http": proxy, "https": proxy})
-        )
+        handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+    opener = urllib.request.build_opener(*handlers)
     for index, oauth in enumerate(candidates):
         token = str(oauth["accessToken"]).strip()
         request = urllib.request.Request(
@@ -221,8 +221,7 @@ def fetch_claude_usage(
             },
         )
         try:
-            open_request = opener.open if opener is not None else urllib.request.urlopen
-            with open_request(request, timeout=timeout) as response:
+            with opener.open(request, timeout=timeout) as response:
                 body = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403) and index + 1 < len(candidates):

@@ -20,9 +20,12 @@ def test_proxy_url_requires_http_scheme_and_host():
 
 def test_codex_direct_request_uses_explicit_proxy_handler():
     proxy_handler = object()
+    https_handler = object()
     with patch.object(
         codex_usage.urllib.request, "ProxyHandler", return_value=proxy_handler
     ) as handler, patch.object(
+        codex_usage.urllib.request, "HTTPSHandler", return_value=https_handler
+    ), patch.object(
         codex_usage.urllib.request, "build_opener", return_value="opener"
     ) as builder:
         opener = codex_usage._opener("http://127.0.0.1:7890")
@@ -30,8 +33,13 @@ def test_codex_direct_request_uses_explicit_proxy_handler():
     handler.assert_called_once_with(
         {"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890"}
     )
-    builder.assert_called_once_with(proxy_handler)
+    builder.assert_called_once_with(https_handler, proxy_handler)
     assert opener == "opener"
+
+
+def test_ssl_context_loads_a_ca_bundle():
+    context = codex_usage.ssl_context()
+    assert context.get_ca_certs()
 
 
 def test_claude_request_uses_explicit_proxy_opener():
@@ -53,11 +61,14 @@ def test_claude_request_uses_explicit_proxy_opener():
             return Response()
 
     proxy_handler = object()
+    https_handler = object()
     with patch.object(
         codex_quota_window, "_read_claude_oauth_candidates", return_value=[{"accessToken": "token"}]
     ), patch.object(
         codex_quota_window.urllib.request, "ProxyHandler", return_value=proxy_handler
     ) as handler, patch.object(
+        codex_quota_window.urllib.request, "HTTPSHandler", return_value=https_handler
+    ), patch.object(
         codex_quota_window.urllib.request, "build_opener", return_value=Opener()
     ) as builder:
         result = codex_quota_window.fetch_claude_usage(3, "http://127.0.0.1:7890")
@@ -65,6 +76,6 @@ def test_claude_request_uses_explicit_proxy_opener():
     handler.assert_called_once_with(
         {"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890"}
     )
-    builder.assert_called_once_with(proxy_handler)
+    builder.assert_called_once_with(https_handler, proxy_handler)
     assert calls == [("https://api.anthropic.com/api/oauth/usage", 3)]
     assert result["five_hour"]["utilization"] == 25

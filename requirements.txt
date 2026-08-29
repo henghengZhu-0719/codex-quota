@@ -1,0 +1,7 @@
+# 运行 CodexQuota 菜单栏应用（codex_quota_window.py）所需依赖。
+# 纯命令行的 codex_quota.py 只用标准库，无需安装任何依赖。
+pyobjc-framework-Cocoa>=10; sys_platform == "darwin"
+
+# CA 证书兜底：系统会优先使用 /etc/ssl/cert.pem，
+# 打包成 .app 或在没有系统证书的环境下运行时由 certifi 提供根证书。
+certifi>=2024.2.2

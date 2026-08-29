@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import ssl
 import subprocess
 import tempfile
 import time
@@ -114,12 +115,46 @@ def _jwt_expiry(token: str) -> Optional[float]:
     return float(expiry) if isinstance(expiry, (int, float)) else None
 
 
+def _ca_file() -> Optional[str]:
+    candidates = [
+        os.environ.get("SSL_CERT_FILE", "").strip(),
+        os.environ.get("REQUESTS_CA_BUNDLE", "").strip(),
+        "/etc/ssl/cert.pem",
+        "/private/etc/ssl/cert.pem",
+    ]
+    try:
+        import certifi
+    except ImportError:
+        pass
+    else:
+        candidates.append(certifi.where())
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def ssl_context() -> ssl.SSLContext:
+    """The frozen .app ships its own OpenSSL, whose compiled-in CA directory
+    does not exist on macOS, so verification fails with
+    CERTIFICATE_VERIFY_FAILED unless a CA bundle is loaded explicitly.
+    """
+    context = ssl.create_default_context()
+    if context.get_ca_certs():
+        return context
+    ca_file = _ca_file()
+    if ca_file:
+        context.load_verify_locations(cafile=ca_file)
+    return context
+
+
 def _opener(proxy_url: Optional[str]):
-    if not proxy_url:
-        return urllib.request.build_opener()
-    return urllib.request.build_opener(
-        urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
-    )
+    handlers: list[Any] = [urllib.request.HTTPSHandler(context=ssl_context())]
+    if proxy_url:
+        handlers.append(
+            urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+        )
+    return urllib.request.build_opener(*handlers)
 
 
 def _request_json(

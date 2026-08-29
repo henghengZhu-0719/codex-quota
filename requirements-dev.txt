@@ -1,0 +1,7 @@
+-r requirements.txt
+
+# 测试
+pytest>=8
+
+# 打包（PyInstaller + CodexQuota.spec）
+pyinstaller>=6

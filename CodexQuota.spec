@@ -28,7 +28,15 @@ a = Analysis(
     pathex=[str(project_dir)],
     binaries=[],
     datas=provider_icons,
-    hiddenimports=["AppKit", "Foundation", "objc", "PyObjCTools.AppHelper"],
+    hiddenimports=[
+        "AppKit",
+        "Foundation",
+        "objc",
+        "PyObjCTools.AppHelper",
+        # 只有显式声明，PyInstaller 才会把 certifi 的 cacert.pem 打进包里；
+        # 冻结后的 OpenSSL 自带的证书目录在 macOS 上并不存在。
+        "certifi",
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
