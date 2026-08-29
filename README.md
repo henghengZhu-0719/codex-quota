@@ -2,6 +2,28 @@
 
 在终端或 macOS 菜单栏查询 Codex、Claude 登录账户的剩余额度与本地 Token 用量。
 
+## 安装（macOS）
+
+从 [Releases](../../releases) 下载 `CodexQuota-<版本号>.dmg`，双击打开后把
+`CodexQuota.app` 拖进 `Applications` 文件夹即可。
+
+### 首次打开被拦截怎么办
+
+应用使用 ad-hoc 签名，没有经过 Apple 公证，因此首次启动会被 Gatekeeper 拦下，
+提示「无法打开，因为无法验证开发者」或「已损坏」。两种解决办法任选其一：
+
+- 在 `Applications` 中**右键点击** `CodexQuota.app` → 选择「打开」→ 在弹窗中再次确认「打开」。
+- 或在终端执行以下命令去掉隔离属性：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/CodexQuota.app
+```
+
+处理一次即可，之后可以正常双击启动。若不放心，也可以按下面的[一键打包](#一键打包)
+自行从源码构建。
+
+应用启动后常驻在顶部菜单栏，不占用 Dock；点击菜单栏图标即可展开额度面板。
+
 ## 项目架构
 
 项目按「数据采集 → 展示 → 打包」三层组织,核心逻辑不依赖任何 GUI 框架,
@@ -66,7 +88,8 @@ codex-quota/
 ├── tests/                    # 各数据模块的单元测试
 ├── CodexQuota.spec           # PyInstaller 配置(macOS .app)
 ├── CodexQuotaWindows.spec    # PyInstaller 配置(Windows .exe)
-├── build_macos.sh            # macOS 一键打包脚本
+├── build_macos.sh            # macOS 一键打包脚本(.app + DMG)
+├── make_dmg.sh               # ad-hoc 签名并生成可拖拽安装的 DMG
 ├── build_windows.bat         # Windows 一键打包脚本
 ├── pyproject.toml            # 包元数据与命令入口
 └── requirements.txt          # 打包依赖
@@ -86,10 +109,25 @@ chmod +x build_macos.sh
 ./build_macos.sh
 ```
 
-生成文件：`dist/CodexQuota.app`
+生成文件：
+
+- `dist/CodexQuota.app` —— 应用本体
+- `dist/CodexQuota-<版本号>.dmg` —— 可拖拽安装的磁盘映像，版本号取自 `pyproject.toml`
 
 脚本使用 `CodexQuota.spec` 打包 macOS 菜单栏应用。应用只在顶部菜单栏常驻，
 不会同时占用 Dock。构建环境位于 `.build-venv-macos`。
+
+最后一步的 DMG 由 `make_dmg.sh` 生成：它先对 `.app` 做 ad-hoc 签名（没有 Apple
+开发者证书时，缺少自洽的签名会让 macOS 直接以「已损坏」为由拒绝启动），再用
+`hdiutil` 打包成带 `Applications` 软链接的映像，用户打开后可以直接拖拽安装。
+如果 `.app` 已经构建好，也可以单独重新生成 DMG：
+
+```bash
+./make_dmg.sh
+```
+
+发布到 Releases 时上传该 DMG 即可。注意 ad-hoc 签名不等于 Apple 公证，
+下载者首次打开仍需按[上文](#首次打开被拦截怎么办)去掉隔离属性。
 
 ### Windows
 

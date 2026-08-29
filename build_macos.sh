@@ -32,5 +32,8 @@ echo "[2/4] Installing build dependencies..."
 echo "[3/4] Building CodexQuota.app..."
 "${VENV_DIR}/bin/python" -m PyInstaller --noconfirm --clean CodexQuota.spec
 
-echo "[4/4] Build complete."
-echo "Output: ${PROJECT_DIR}/dist/CodexQuota.app"
+echo "[4/4] Packaging DMG..."
+"${PROJECT_DIR}/make_dmg.sh"
+
+echo "Build complete."
+echo "App: ${PROJECT_DIR}/dist/CodexQuota.app"
