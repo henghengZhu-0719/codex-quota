@@ -4,19 +4,19 @@
 
 ## 安装（macOS）
 
-从 [Releases](../../releases) 下载 `CodexQuota-<版本号>.dmg`，双击打开后把
-`CodexQuota.app` 拖进 `Applications` 文件夹即可。
+从 [Releases](../../releases) 下载 `QuotaBar-<版本号>.dmg`，双击打开后把
+`QuotaBar.app` 拖进 `Applications` 文件夹即可。
 
 ### 首次打开被拦截怎么办
 
 应用使用 ad-hoc 签名，没有经过 Apple 公证，因此首次启动会被 Gatekeeper 拦下，
 提示「无法打开，因为无法验证开发者」或「已损坏」。两种解决办法任选其一：
 
-- 在 `Applications` 中**右键点击** `CodexQuota.app` → 选择「打开」→ 在弹窗中再次确认「打开」。
+- 在 `Applications` 中**右键点击** `QuotaBar.app` → 选择「打开」→ 在弹窗中再次确认「打开」。
 - 或在终端执行以下命令去掉隔离属性：
 
 ```bash
-xattr -dr com.apple.quarantine /Applications/CodexQuota.app
+xattr -dr com.apple.quarantine /Applications/QuotaBar.app
 ```
 
 处理一次即可，之后可以正常双击启动。若不放心，也可以按下面的[一键打包](#一键打包)
@@ -86,7 +86,7 @@ codex-quota/
 │   ├── codex.icns            # macOS 应用图标
 │   └── provider-icons/       # 托盘 Codex/Claude 模板图标(SVG)
 ├── tests/                    # 各数据模块的单元测试
-├── CodexQuota.spec           # PyInstaller 配置(macOS .app)
+├── QuotaBar.spec             # PyInstaller 配置(macOS .app)
 ├── CodexQuotaWindows.spec    # PyInstaller 配置(Windows .exe)
 ├── build_macos.sh            # macOS 一键打包脚本(.app + DMG)
 ├── make_dmg.sh               # ad-hoc 签名并生成可拖拽安装的 DMG
@@ -111,10 +111,10 @@ chmod +x build_macos.sh
 
 生成文件：
 
-- `dist/CodexQuota.app` —— 应用本体
-- `dist/CodexQuota-<版本号>.dmg` —— 可拖拽安装的磁盘映像，版本号取自 `pyproject.toml`
+- `dist/QuotaBar.app` —— 应用本体
+- `dist/QuotaBar-<版本号>.dmg` —— 可拖拽安装的磁盘映像，版本号取自 `pyproject.toml`
 
-脚本使用 `CodexQuota.spec` 打包 macOS 菜单栏应用。应用只在顶部菜单栏常驻，
+脚本使用 `QuotaBar.spec` 打包 macOS 菜单栏应用。应用只在顶部菜单栏常驻，
 不会同时占用 Dock。构建环境位于 `.build-venv-macos`。
 
 最后一步的 DMG 由 `make_dmg.sh` 生成：它先对 `.app` 做 ad-hoc 签名（没有 Apple
@@ -186,9 +186,9 @@ python3 codex_quota_window.py
 查询失败时显示 `!`，并自动适配浅色/深色菜单栏。单击菜单栏图标即可在图标正下方
 展开圆角深色详情面板（原生
 popover，自带箭头指向图标），点击面板外部、按 Esc 或再次点击图标会自动收起；
-右键图标可退出应用。Codex 与 Claude 的配额默认每 15 分钟一起自动刷新（这两个
+右键图标可退出应用。Codex 与 Claude 的配额默认每 20 分钟一起自动刷新（这两个
 窗口本身是 5 小时 / 7 天粒度，更高的频率没有意义，还会增加撞上接口限流的概率），
-面板内也可手动刷新，也可以调整刷新间隔：
+面板内也可手动刷新，间隔也可以在设置窗口里调整：
 
 面板底部还会显示 Claude Session（5 小时窗口）、Weekly（7 天窗口），以及账户实际
 返回的 Sonnet、Fable 和 Extra Usage，样式和 Codex 部分一致。Codex 的窗口会按返回的
@@ -201,10 +201,10 @@ OAuth access token 只用于向 Anthropic 发起这一次只读请求，不落�
 刷新——所有来源都失效后，面板会提示重新运行 `claude` 登录，而不是静默续期。
 这个接口没有文档、可能随时变化，请知悉。
 
-每个提供商下方还会显示 **本地 Token 用量**，分别统计今天、昨天和最近 30 天的
-调用次数与 Token 数，并用
-一张可左右滑动的小柱状图展示最近 30 个自然日的每日用量（默认显示最新 7 天，
-鼠标悬停到某根柱子时只显示当天的精确 Token 数）：
+每个提供商下方还会显示 **本地 Token 用量**：今天的用量作为主数字显示，右侧标出
+相对昨天的增减，下方一行给出昨天与最近 30 天的合计。再下方用一张柱状图一次铺满
+最近 30 个自然日的每日用量，不需要滚动；所有柱子共用同一个基准（顶部标出峰值），
+因此高度之间可以直接比较，鼠标悬停到某根柱子时显示当天的精确日期与 Token 数：
 
 - Codex 扫描 `$CODEX_HOME`（默认 `~/.codex`）下的 `sessions/` 和
   `archived_sessions/` JSONL 日志；按累计值计算增量，并过滤重复快照、子代理回放和
@@ -218,12 +218,17 @@ OAuth access token 只用于向 Anthropic 发起这一次只读请求，不落�
 python3 codex_quota_window.py --refresh 60
 ```
 
-### HTTP 代理
+### 设置
 
-点击面板右上角的 **⚙︎**，可以填写 HTTP(S) 代理，例如
-`http://127.0.0.1:7890`。保存后会立即刷新，并同时用于 Codex 和 Claude 的用量
-接口；点击 **清除** 后恢复系统默认网络设置。代理地址保存在当前用户的 macOS
-应用偏好设置中，不会写入项目文件或日志。
+点击面板右上角的 **⚙︎** 打开设置窗口，目前有两项：
+
+- **HTTP 代理** —— 例如 `http://127.0.0.1:7890`，同时用于 Codex 和 Claude 的用量
+  接口；留空则跟随系统代理设置。地址格式不合法时会在输入框下方就地提示。
+- **刷新间隔** —— 5 / 10 / 15 / 20 / 30 / 60 分钟，改完立即重新计时。
+
+两项都在修改后立即生效并保存，不需要确认按钮（与 macOS 系统设置一致）。设置保存
+在当前用户的 macOS 应用偏好中，不会写入项目文件或日志。命令行的 `--refresh` 只作为
+首次运行的默认值，设置窗口里改过之后以保存的值为准。
 
 终端命令也可以临时指定代理：
 

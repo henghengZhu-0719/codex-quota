@@ -26,12 +26,10 @@ try:
     from AppKit import (
         NSAppearance,
         NSAppearanceNameAqua,
-        NSAlert,
-        NSAlertFirstButtonReturn,
-        NSAlertThirdButtonReturn,
         NSApplication,
         NSApplicationActivationPolicyAccessory,
         NSApp,
+        NSBackingStoreBuffered,
         NSBezierPath,
         NSButton,
         NSColor,
@@ -51,6 +49,7 @@ try:
         NSMinYEdge,
         NSPopover,
         NSPopoverBehaviorTransient,
+        NSPopUpButton,
         NSForegroundColorAttributeName,
         NSStatusBar,
         NSTextAlignmentCenter,
@@ -65,6 +64,9 @@ try:
         NSVisualEffectMaterialPopover,
         NSVisualEffectStateActive,
         NSVisualEffectView,
+        NSWindow,
+        NSWindowStyleMaskClosable,
+        NSWindowStyleMaskTitled,
     )
     from Foundation import (
         NSMakePoint,
@@ -272,6 +274,38 @@ def _rgba(r: int, g: int, b: int, a: float = 1.0) -> "NSColor":
     return NSColor.colorWithCalibratedRed_green_blue_alpha_(r / 255, g / 255, b / 255, a)
 
 
+def _read_saved_proxy() -> Optional[str]:
+    """Current proxy setting, migrating the pre-rename one on first read."""
+    defaults = NSUserDefaults.standardUserDefaults()
+    value = defaults.stringForKey_(PROXY_DEFAULTS_KEY)
+    if value and str(value).strip():
+        return str(value).strip()
+
+    legacy = defaults.stringForKey_(LEGACY_PROXY_DEFAULTS_KEY)
+    if not legacy:
+        # Renaming the bundle also moves the defaults domain, so the old value
+        # has to be read out of the old domain by name.
+        domain = defaults.persistentDomainForName_(LEGACY_BUNDLE_ID)
+        if domain:
+            legacy = domain.get(LEGACY_PROXY_DEFAULTS_KEY) or domain.get(
+                PROXY_DEFAULTS_KEY
+            )
+    if legacy and str(legacy).strip():
+        migrated = str(legacy).strip()
+        defaults.setObject_forKey_(migrated, PROXY_DEFAULTS_KEY)
+        return migrated
+    return None
+
+
+def _read_saved_refresh_minutes(fallback: float) -> float:
+    """Saved refresh interval in minutes, or the command-line value."""
+    defaults = NSUserDefaults.standardUserDefaults()
+    if defaults.objectForKey_(REFRESH_DEFAULTS_KEY) is None:
+        return fallback
+    minutes = defaults.doubleForKey_(REFRESH_DEFAULTS_KEY)
+    return minutes if minutes > 0 else fallback
+
+
 ACCENT = _rgba(0x9B, 0x7B, 0xFF)
 WARN = _rgba(0xF5, 0xC4, 0x51)
 DANGER = _rgba(0xFF, 0x62, 0x59)
@@ -293,7 +327,21 @@ TRAY_ICON_SIZE = 15.0
 TRAY_ICON_TEXT_GAP = 3.0
 TRAY_GROUP_GAP = 10.0
 TRAY_FONT_SIZE = 10.0
-PROXY_DEFAULTS_KEY = "CodexQuotaHTTPProxy"
+APP_NAME = "QuotaBar"
+PROXY_DEFAULTS_KEY = "QuotaBarHTTPProxy"
+REFRESH_DEFAULTS_KEY = "QuotaBarRefreshMinutes"
+# 0.1.0 及更早叫 CodexQuota，键名与 bundle id 都不同；改名后要把旧设置迁过来，
+# 否则用户升级一次就得重新填代理。
+LEGACY_PROXY_DEFAULTS_KEY = "CodexQuotaHTTPProxy"
+LEGACY_BUNDLE_ID = "com.codexquota.menubar"
+
+REFRESH_PRESET_MINUTES = (5, 10, 15, 20, 30, 60)
+DEFAULT_REFRESH_MINUTES = 20
+
+SETTINGS_WIDTH = 440.0
+SETTINGS_MARGIN = 24.0
+SETTINGS_LABEL_RIGHT = 148.0
+SETTINGS_CONTROL_X = 162.0
 
 ROW_HEIGHT = 18
 ROW_LABEL_WIDTH = 112
@@ -800,6 +848,174 @@ def _make_icon_button(title: str, target: "NSObject", action: str) -> "NSButton"
     return button
 
 
+def _settings_label(text: str) -> "NSTextField":
+    """Right-aligned form label in the system control font."""
+    label = NSTextField.labelWithString_(text)
+    label.setFont_(NSFont.systemFontOfSize_(13))
+    label.setTextColor_(NSColor.labelColor())
+    label.setAlignment_(NSTextAlignmentRight)
+    return label
+
+
+def _settings_note(text: str) -> "NSTextField":
+    """The small explanatory line that sits under a control."""
+    note = NSTextField.labelWithString_(text)
+    note.setFont_(NSFont.systemFontOfSize_(11))
+    note.setTextColor_(NSColor.secondaryLabelColor())
+    note.cell().setWraps_(True)
+    return note
+
+
+class _SettingsWindow(NSObject):
+    """A standard macOS settings panel.
+
+    Two conventions from the system's own settings windows are what make this
+    read as native: labels are right-aligned into a fixed column with the
+    controls beside them, and there is no OK/Cancel pair — each control
+    commits on its own, with the explanatory text sitting under it.
+
+    Unlike the popover, this window follows the system light/dark appearance,
+    so every colour here is a semantic system one rather than a fixed value.
+    """
+
+    def initWithOwner_(self, owner: "QuotaMenuBarApp") -> "_SettingsWindow":
+        self = objc.super(_SettingsWindow, self).init()
+        if self is None:
+            return None
+        self.owner = owner
+        self.window = None
+        self.proxy_field = None
+        self.proxy_note = None
+        self.interval_popup = None
+        return self
+
+    # -- Construction -----------------------------------------------------
+    def _build(self) -> None:
+        control_width = SETTINGS_WIDTH - SETTINGS_CONTROL_X - SETTINGS_MARGIN
+        content = _FlippedView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, SETTINGS_WIDTH, 10)
+        )
+        y = 22.0
+
+        proxy_label = _settings_label("HTTP 代理：")
+        proxy_label.setFrame_(
+            NSMakeRect(SETTINGS_MARGIN, y + 3, SETTINGS_LABEL_RIGHT - SETTINGS_MARGIN, 18)
+        )
+        content.addSubview_(proxy_label)
+
+        field = NSTextField.alloc().initWithFrame_(
+            NSMakeRect(SETTINGS_CONTROL_X, y, control_width, 22)
+        )
+        field.setPlaceholderString_("http://127.0.0.1:7890")
+        field.setFont_(NSFont.systemFontOfSize_(13))
+        # Fires on Return and again when focus leaves, so the value commits
+        # without a Save button.
+        field.cell().setSendsActionOnEndEditing_(True)
+        field.setTarget_(self)
+        field.setAction_("proxyChanged:")
+        content.addSubview_(field)
+        self.proxy_field = field
+        y += 22 + 6
+
+        note = _settings_note("")
+        note.setFrame_(NSMakeRect(SETTINGS_CONTROL_X, y, control_width, 32))
+        content.addSubview_(note)
+        self.proxy_note = note
+        y += 32 + 20
+
+        interval_label = _settings_label("刷新间隔：")
+        interval_label.setFrame_(
+            NSMakeRect(SETTINGS_MARGIN, y + 4, SETTINGS_LABEL_RIGHT - SETTINGS_MARGIN, 18)
+        )
+        content.addSubview_(interval_label)
+
+        popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(SETTINGS_CONTROL_X, y, 130, 25), False
+        )
+        popup.addItemsWithTitles_([f"{m} 分钟" for m in REFRESH_PRESET_MINUTES])
+        popup.setTarget_(self)
+        popup.setAction_("intervalChanged:")
+        content.addSubview_(popup)
+        self.interval_popup = popup
+        y += 25 + 6
+
+        interval_note = _settings_note("菜单栏图标与面板的自动刷新频率。随时点面板上的刷新按钮可立即更新。")
+        interval_note.setFrame_(NSMakeRect(SETTINGS_CONTROL_X, y, control_width, 32))
+        content.addSubview_(interval_note)
+        y += 32 + 22
+
+        content.setFrameSize_(NSMakeSize(SETTINGS_WIDTH, y))
+        window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(0, 0, SETTINGS_WIDTH, y),
+            NSWindowStyleMaskTitled | NSWindowStyleMaskClosable,
+            NSBackingStoreBuffered,
+            False,
+        )
+        window.setTitle_(f"{APP_NAME} 设置")
+        # The controller outlives the window; without this the window is
+        # deallocated on close and reopening it crashes.
+        window.setReleasedWhenClosed_(False)
+        window.setContentView_(content)
+        self.window = window
+
+    # -- Presentation -----------------------------------------------------
+    def show(self) -> None:
+        if self.window is None:
+            self._build()
+        self._reload()
+        # An accessory (LSUIElement) app is never frontmost on its own, so
+        # without this the window opens behind whatever the user was using.
+        NSApp.activateIgnoringOtherApps_(True)
+        self.window.center()
+        self.window.makeKeyAndOrderFront_(None)
+        self.window.makeFirstResponder_(self.proxy_field)
+
+    def _reload(self) -> None:
+        self.proxy_field.setStringValue_(self.owner.proxy_url or "")
+        self._showNote_(None)
+        minutes = self.owner.refresh_seconds / 60.0
+        # Land on the closest preset when the interval came from --refresh.
+        closest = min(REFRESH_PRESET_MINUTES, key=lambda m: abs(m - minutes))
+        self.interval_popup.selectItemAtIndex_(
+            REFRESH_PRESET_MINUTES.index(closest)
+        )
+
+    def _showNote_(self, error: Optional[str]) -> None:
+        if error:
+            self.proxy_note.setStringValue_(f"⚠︎ {error}")
+            self.proxy_note.setTextColor_(NSColor.systemRedColor())
+        else:
+            self.proxy_note.setStringValue_(
+                "同时用于 Codex 与 Claude 的网络请求。留空则跟随系统代理设置。"
+            )
+            self.proxy_note.setTextColor_(NSColor.secondaryLabelColor())
+
+    # -- Actions ----------------------------------------------------------
+    def proxyChanged_(self, sender) -> None:
+        raw = str(sender.stringValue()).strip()
+        if not raw:
+            self._showNote_(None)
+            if self.owner.proxy_url is not None:
+                self.owner.applyProxy_(None)
+            return
+        try:
+            proxy = normalize_proxy_url(raw)
+        except QuotaError as exc:
+            # Inline, next to the field that caused it — stacking a second
+            # modal alert on top of the settings window is not how macOS
+            # reports a bad value.
+            self._showNote_(str(exc))
+            return
+        self._showNote_(None)
+        if proxy != self.owner.proxy_url:
+            self.owner.applyProxy_(proxy)
+
+    def intervalChanged_(self, sender) -> None:
+        index = int(sender.indexOfSelectedItem())
+        if 0 <= index < len(REFRESH_PRESET_MINUTES):
+            self.owner.applyRefreshMinutes_(REFRESH_PRESET_MINUTES[index])
+
+
 class _Layout:
     """Tracks a running top-down y offset and stamps frames onto views."""
 
@@ -835,18 +1051,22 @@ class QuotaMenuBarApp(NSObject):
         self = objc.super(QuotaMenuBarApp, self).init()
         if self is None:
             return None
-        self.refresh_seconds = 1200
+        # The saved setting wins over --refresh, which is only the fallback
+        # for a first run.
+        self.refresh_seconds = (
+            _read_saved_refresh_minutes(options["refresh"] / 60.0) * 60.0
+        )
         self.timeout = options["timeout"]
         self.status_item = None
         self.popover = None
         self.effect_view = None
         self.header_refresh_button = None
         self.header_settings_button = None
+        self.settings_window = None
         self._fetching = False
         self._refresh_timer = None
         self._last_close_time: Optional[float] = None
-        saved_proxy = NSUserDefaults.standardUserDefaults().stringForKey_(PROXY_DEFAULTS_KEY)
-        self.proxy_url = str(saved_proxy).strip() if saved_proxy else None
+        self.proxy_url = _read_saved_proxy()
         return self
 
     # -- App lifecycle --------------------------------------------------
@@ -993,44 +1213,29 @@ class QuotaMenuBarApp(NSObject):
         self.refresh()
 
     def settingsClicked_(self, sender) -> None:
-        alert = NSAlert.alloc().init()
-        alert.setMessageText_("HTTP 代理")
-        alert.setInformativeText_(
-            "代理将同时用于 Codex 和 Claude 的网络请求。清空后恢复系统默认设置。"
-        )
-        field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 360, 24))
-        field.setPlaceholderString_("http://127.0.0.1:7890")
-        field.setStringValue_(self.proxy_url or "")
-        alert.setAccessoryView_(field)
-        alert.addButtonWithTitle_("保存")
-        alert.addButtonWithTitle_("取消")
-        alert.addButtonWithTitle_("清除")
+        if self.settings_window is None:
+            self.settings_window = _SettingsWindow.alloc().initWithOwner_(self)
+        self.settings_window.show()
 
-        response = alert.runModal()
-        if response == NSAlertThirdButtonReturn:
-            self._save_proxy(None)
-            return
-        if response != NSAlertFirstButtonReturn:
-            return
-        try:
-            proxy = normalize_proxy_url(field.stringValue())
-        except QuotaError as exc:
-            error_alert = NSAlert.alloc().init()
-            error_alert.setMessageText_("代理地址无效")
-            error_alert.setInformativeText_(str(exc))
-            error_alert.addButtonWithTitle_("确定")
-            error_alert.runModal()
-            return
-        self._save_proxy(proxy)
-
-    def _save_proxy(self, proxy: Optional[str]) -> None:
+    def applyProxy_(self, proxy: Optional[str]) -> None:
         defaults = NSUserDefaults.standardUserDefaults()
         if proxy:
             defaults.setObject_forKey_(proxy, PROXY_DEFAULTS_KEY)
         else:
             defaults.removeObjectForKey_(PROXY_DEFAULTS_KEY)
+            # Drop the pre-rename copy too, or the next launch migrates it
+            # straight back in.
+            defaults.removeObjectForKey_(LEGACY_PROXY_DEFAULTS_KEY)
         self.proxy_url = proxy
         self.refresh()
+
+    def applyRefreshMinutes_(self, minutes: float) -> None:
+        defaults = NSUserDefaults.standardUserDefaults()
+        defaults.setDouble_forKey_(float(minutes), REFRESH_DEFAULTS_KEY)
+        self.refresh_seconds = float(minutes) * 60.0
+        # Restart the countdown now, so a shorter interval takes effect
+        # immediately instead of after the pending one elapses.
+        self._schedule_next_refresh()
 
     def quitClicked_(self, sender) -> None:
         NSApp.terminate_(None)
@@ -1091,12 +1296,25 @@ class QuotaMenuBarApp(NSObject):
         )
         self._finish_refresh()
 
+    def _schedule_next_refresh(self) -> None:
+        """Arm the one-shot refresh timer, replacing any pending one.
+
+        Every manual refresh used to schedule an additional timer while the
+        previous one was still pending, so the refreshes compounded over a
+        session instead of staying on one interval.
+        """
+        if self._refresh_timer is not None:
+            self._refresh_timer.invalidate()
+        self._refresh_timer = (
+            NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                self.refresh_seconds, self, "refreshTimerFired:", None, False
+            )
+        )
+
     def _finish_refresh(self) -> None:
         self._fetching = False
         self.header_refresh_button.setEnabled_(True)
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            self.refresh_seconds, self, "refreshTimerFired:", None, False
-        )
+        self._schedule_next_refresh()
 
     # -- Rendering ----------------------------------------------------------
     def _clear_body(self) -> None:

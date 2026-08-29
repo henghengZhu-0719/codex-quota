@@ -29,11 +29,11 @@ echo "[2/4] Installing build dependencies..."
 "${VENV_DIR}/bin/python" -m pip install --upgrade pip
 "${VENV_DIR}/bin/python" -m pip install -r requirements.txt
 
-echo "[3/4] Building CodexQuota.app..."
-"${VENV_DIR}/bin/python" -m PyInstaller --noconfirm --clean CodexQuota.spec
+echo "[3/4] Building QuotaBar.app..."
+"${VENV_DIR}/bin/python" -m PyInstaller --noconfirm --clean QuotaBar.spec
 
 echo "[4/4] Packaging DMG..."
 "${PROJECT_DIR}/make_dmg.sh"
 
 echo "Build complete."
-echo "App: ${PROJECT_DIR}/dist/CodexQuota.app"
+echo "App: ${PROJECT_DIR}/dist/QuotaBar.app"

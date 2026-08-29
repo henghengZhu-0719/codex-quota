@@ -50,7 +50,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="CodexQuota",
+    name="QuotaBar",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -66,18 +66,18 @@ collection = COLLECT(
     a.datas,
     strip=False,
     upx=False,
-    name="CodexQuota",
+    name="QuotaBar",
 )
 
 app = BUNDLE(
     collection,
-    name="CodexQuota.app",
+    name="QuotaBar.app",
     icon=icon,
-    bundle_identifier="com.codexquota.menubar",
+    bundle_identifier="com.quotabar.menubar",
     info_plist={
         # A menu-bar utility should not add a second icon to the Dock.
         "LSUIElement": True,
         "NSHighResolutionCapable": True,
-        "CFBundleDisplayName": "Codex Quota",
+        "CFBundleDisplayName": "QuotaBar",
     },
 )

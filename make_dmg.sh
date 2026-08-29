@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# 把 dist/CodexQuota.app 打成可拖拽安装的 DMG。
+# 把 dist/QuotaBar.app 打成可拖拽安装的 DMG。
 # 既可由 build_macos.sh 自动调用，也可在已有 .app 时单独运行。
 
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APP_PATH="${PROJECT_DIR}/dist/CodexQuota.app"
-VOLUME_NAME="CodexQuota"
+APP_PATH="${PROJECT_DIR}/dist/QuotaBar.app"
+VOLUME_NAME="QuotaBar"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
     echo "Error: DMG 只能在 macOS 上制作。" >&2
@@ -23,12 +23,12 @@ fi
 VERSION="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' \
     "${PROJECT_DIR}/pyproject.toml" | head -n 1)"
 VERSION="${VERSION:-0.0.0}"
-DMG_PATH="${PROJECT_DIR}/dist/CodexQuota-${VERSION}.dmg"
+DMG_PATH="${PROJECT_DIR}/dist/QuotaBar-${VERSION}.dmg"
 
 # 没有 Apple 开发者证书时用 ad-hoc 签名。这不能让 Gatekeeper 放行
 # （用户仍需去掉隔离属性），但能保证 .app 内的二进制签名自洽，
 # 否则 macOS 会直接以「已损坏」为由拒绝启动。
-echo "[1/3] Ad-hoc 签名 CodexQuota.app..."
+echo "[1/3] Ad-hoc 签名 QuotaBar.app..."
 codesign --force --deep --sign - "${APP_PATH}"
 codesign --verify --deep --strict "${APP_PATH}"
 

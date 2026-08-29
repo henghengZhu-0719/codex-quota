@@ -346,7 +346,7 @@ def _fetch_with_state(
         headers = {
             "Authorization": f"Bearer {token}",
             "Accept": "application/json",
-            "User-Agent": "CodexQuota",
+            "User-Agent": "QuotaBar",
         }
         account_id = state.tokens.get("account_id")
         if isinstance(account_id, str) and account_id:
