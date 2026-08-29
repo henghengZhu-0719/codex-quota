@@ -41,6 +41,7 @@ try:
         NSFont,
         NSFontAttributeName,
         NSFontWeightBold,
+        NSFontWeightMedium,
         NSFontWeightRegular,
         NSFontWeightSemibold,
         NSImage,
@@ -298,11 +299,18 @@ ROW_HEIGHT = 18
 ROW_LABEL_WIDTH = 112
 ROW_PERCENT_WIDTH = 44
 ROW_BAR_GAP = 10
-ROW_BAR_HEIGHT = 6
+ROW_BAR_HEIGHT = 7
 RESET_HEIGHT = 14
-WINDOW_GAP = 10
-DAILY_CHART_HEIGHT = 58
+WINDOW_GAP = 14
+DAILY_CHART_HEIGHT = 62
 DAILY_CHART_ANIMATION_SECONDS = 0.55
+# 相邻柱子之间留出的表面间隙，让 30 根细柱不糊成一片。
+DAILY_CHART_BAR_GAP = 2.0
+# 数据不足 30 天时给柱子封顶，否则单日数据会摊成一整块色板。
+DAILY_CHART_MAX_BAR_WIDTH = 14.0
+DAILY_CHART_AXIS_HEIGHT = 13.0
+DAILY_CHART_PEAK_HEIGHT = 12.0
+GRIDLINE_COLOR = NSColor.colorWithCalibratedWhite_alpha_(0.0, 0.14)
 
 
 def _remaining(window: dict[str, Any]) -> int:
@@ -399,6 +407,56 @@ def _format_token_count(value: int) -> str:
     if value >= 1_000:
         return f"{value / 1_000:.1f}K Token"
     return f"{value} Token"
+
+
+def _format_token_short(value: int) -> str:
+    """Same magnitudes as _format_token_count, minus the unit suffix — the
+    headline number carries its unit in the caption underneath instead."""
+
+    def trim(number: float) -> str:
+        # One decimal everywhere, trailing zeros dropped — so the headline and
+        # the context line below it never disagree on precision (1.3M / 1.2M,
+        # never 1.3M / 1.16M).
+        return f"{number:.1f}".rstrip("0").rstrip(".")
+
+    if value >= 1_000_000_000:
+        return f"{trim(value / 1_000_000_000)}B"
+    if value >= 1_000_000:
+        return f"{trim(value / 1_000_000)}M"
+    if value >= 1_000:
+        return f"{trim(value / 1_000)}K"
+    return str(value)
+
+
+def _format_delta(today: int, yesterday: int) -> Optional[str]:
+    """Today against yesterday, as a signed percentage.
+
+    Returns None when there is no honest comparison to draw: no baseline to
+    divide by, or a change too small to be worth the ink.
+    """
+    if yesterday <= 0 or today <= 0:
+        return None
+    change = (today - yesterday) / yesterday * 100
+    if abs(change) < 1:
+        return "与昨天持平"
+    arrow = "↑" if change > 0 else "↓"
+    return f"{arrow} {abs(change):.0f}% vs 昨天"
+
+
+def _make_number_label(
+    text: str,
+    size: float,
+    weight: float = NSFontWeightRegular,
+    color: "NSColor" = SECONDARY_TEXT,
+    alignment=None,
+) -> "NSTextField":
+    """Monospaced digits, so a refreshed number does not shift the layout."""
+    label = NSTextField.labelWithString_(text)
+    label.setFont_(NSFont.monospacedDigitSystemFontOfSize_weight_(size, weight))
+    label.setTextColor_(color)
+    if alignment is not None:
+        label.setAlignment_(alignment)
+    return label
 
 
 def _short_reset(timestamp: Any) -> str:
@@ -545,21 +603,28 @@ class _Separator(_FlippedView):
 
 
 class _DailyTokenChart(_FlippedView):
-    """Scrollable daily token chart showing seven days at a time."""
+    """Daily token chart: every day in the range fits at once, no scrolling.
 
-    visible_bar_count = 7
+    The earlier version showed seven days and scrolled horizontally, scaling
+    the bars against the maximum of the *visible* slice — so the same day
+    changed height depending on the scroll position. Fitting the whole range
+    lets one fixed baseline serve every bar, which is what makes the heights
+    comparable at all.
+    """
 
-    def maximumScrollOffset(self) -> float:
+    def slotWidth(self) -> float:
         points = getattr(self, "points", [])
-        if len(points) <= self.visible_bar_count:
+        if not points:
             return 0.0
-        slot_width = self.bounds().size.width / self.visible_bar_count
-        return (len(points) - self.visible_bar_count) * slot_width
+        return self.bounds().size.width / len(points)
 
-    def showLatest(self) -> None:
-        self.scroll_offset = self.maximumScrollOffset()
-        self.updateToolTips()
-        self.setNeedsDisplay_(True)
+    def chartRect(self) -> "NSRect":
+        bounds = self.bounds()
+        top = DAILY_CHART_PEAK_HEIGHT
+        height = max(
+            1.0, bounds.size.height - top - DAILY_CHART_AXIS_HEIGHT
+        )
+        return NSMakeRect(0, top, bounds.size.width, height)
 
     def updateToolTips(self) -> None:
         self.removeAllToolTips()
@@ -567,17 +632,18 @@ class _DailyTokenChart(_FlippedView):
         points = getattr(self, "points", [])
         if not points or self.bounds().size.width <= 0:
             return
-        width = self.bounds().size.width
-        slot_width = width / self.visible_bar_count
-        scroll_offset = getattr(self, "scroll_offset", 0.0)
+        slot_width = self.slotWidth()
+        chart = self.chartRect()
         for index, point in enumerate(points):
-            slot_x = index * slot_width - scroll_offset
-            left = max(0.0, slot_x)
-            right = min(width, slot_x + slot_width)
-            if right <= left:
-                continue
+            # The hit target spans the whole slot, not just the drawn bar, so
+            # a thin bar (or an empty day) is still reachable by the pointer.
             tag = self.addToolTipRect_owner_userData_(
-                NSMakeRect(left, 0, right - left, self.bounds().size.height),
+                NSMakeRect(
+                    index * slot_width,
+                    chart.origin.y,
+                    slot_width,
+                    chart.size.height,
+                ),
                 self,
                 None,
             )
@@ -590,18 +656,6 @@ class _DailyTokenChart(_FlippedView):
         if usage is None:
             return ""
         return f"{usage.day:%Y-%m-%d}  {_format_token_count(usage.total_tokens)}"
-
-    def scrollWheel_(self, event) -> None:
-        delta = event.scrollingDeltaX()
-        if abs(delta) < 0.01:
-            objc.super(_DailyTokenChart, self).scrollWheel_(event)
-            return
-        current = getattr(self, "scroll_offset", 0.0)
-        self.scroll_offset = max(
-            0.0, min(self.maximumScrollOffset(), current + delta)
-        )
-        self.updateToolTips()
-        self.setNeedsDisplay_(True)
 
     def startAnimation(self) -> None:
         timer = getattr(self, "animation_timer", None)
@@ -632,78 +686,95 @@ class _DailyTokenChart(_FlippedView):
             return
 
         bounds = self.bounds()
-        label_height = 15.0
-        chart_top = 3.0
-        chart_height = max(1.0, bounds.size.height - label_height - chart_top - 3.0)
-        slot_width = bounds.size.width / self.visible_bar_count
-        bar_width = min(18.0, max(6.0, slot_width - 9.0))
-        scroll_offset = getattr(self, "scroll_offset", 0.0)
-        first_visible = max(0, int(scroll_offset // slot_width))
-        visible_points = points[
-            first_visible : min(len(points), first_visible + self.visible_bar_count + 1)
-        ]
-        maximum = max((point.total_tokens for point in visible_points), default=0)
+        chart = self.chartRect()
+        chart_top = chart.origin.y
+        chart_height = chart.size.height
+        baseline = chart_top + chart_height
+        slot_width = self.slotWidth()
+        bar_width = max(
+            1.0, min(slot_width - DAILY_CHART_BAR_GAP, DAILY_CHART_MAX_BAR_WIDTH)
+        )
+        bar_inset = (slot_width - bar_width) / 2
+        # One baseline for the whole range — never the visible slice.
+        maximum = max((point.total_tokens for point in points), default=0)
         animation_progress = getattr(self, "animation_progress", 1.0)
-        label_font = NSFont.monospacedDigitSystemFontOfSize_weight_(9, NSFontWeightRegular)
         label_attributes = {
-            NSFontAttributeName: label_font,
+            NSFontAttributeName: NSFont.monospacedDigitSystemFontOfSize_weight_(
+                9, NSFontWeightRegular
+            ),
             NSForegroundColorAttributeName: MUTED_TEXT,
         }
+        last_index = len(points) - 1
+
+        # Scale reference: a hairline at the peak, labelled once on the right.
+        # Without it the bars only say "more than" and "less than".
+        if maximum > 0:
+            GRIDLINE_COLOR.setFill()
+            NSBezierPath.fillRect_(
+                NSMakeRect(0, chart_top, bounds.size.width, 1.0)
+            )
+            peak = NSString.stringWithString_(f"峰值 {_format_token_short(maximum)}")
+            peak_size = peak.sizeWithAttributes_(label_attributes)
+            peak.drawAtPoint_withAttributes_(
+                NSMakePoint(
+                    bounds.size.width - peak_size.width,
+                    chart_top - DAILY_CHART_PEAK_HEIGHT + 1.0,
+                ),
+                label_attributes,
+            )
 
         for index, point in enumerate(points):
-            slot_x = index * slot_width - scroll_offset
-            if slot_x + slot_width < 0 or slot_x > bounds.size.width:
-                continue
-            x = slot_x + (slot_width - bar_width) / 2
-            track_rect = NSMakeRect(x, chart_top, bar_width, chart_height)
-            radius = min(3.0, bar_width / 2)
-            track = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                track_rect, radius, radius
-            )
-            BAR_TRACK_COLOR.setFill()
-            track.fill()
+            x = index * slot_width + bar_inset
 
             if point.total_tokens > 0 and maximum > 0:
                 # Stagger the bars from left to right, then ease each one out.
                 bar_progress = max(
-                    0.0,
-                    min(
-                        1.0,
-                        animation_progress * 1.3
-                        - max(0, index - first_visible) * 0.05,
-                    ),
+                    0.0, min(1.0, animation_progress * 1.6 - index * 0.018)
                 )
                 eased_progress = 1.0 - (1.0 - bar_progress) ** 3
                 target_height = chart_height * point.total_tokens / maximum
-                height = max(1.0, target_height * eased_progress)
-                fill_rect = NSMakeRect(
-                    x, chart_top + chart_height - height, bar_width, height
-                )
-                fill_radius = min(radius, height / 2)
+                height = max(1.5, target_height * eased_progress)
+                fill_rect = NSMakeRect(x, baseline - height, bar_width, height)
+                radius = min(bar_width / 2, height / 2, 2.0)
                 fill = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                    fill_rect, fill_radius, fill_radius
+                    fill_rect, radius, radius
                 )
+                # Emphasis, not category: today carries the accent at full
+                # strength and the preceding days recede into context.
                 color = ACCENT.colorWithAlphaComponent_(
-                    1.0 if index == len(points) - 1 else 0.62
+                    1.0 if index == last_index else 0.45
                 )
                 color.setFill()
                 fill.fill()
-
-            if index == len(points) - 1:
-                day_label = "今天"
-            elif point.day.day == 1:
-                day_label = f"{point.day.month}/1"
             else:
-                day_label = str(point.day.day)
-            text = NSString.stringWithString_(day_label)
-            text_size = text.sizeWithAttributes_(label_attributes)
+                # An empty day still gets a tick, so gaps read as "nothing
+                # used" rather than as a rendering glitch.
+                GRIDLINE_COLOR.setFill()
+                NSBezierPath.fillRect_(
+                    NSMakeRect(x, baseline - 1.0, bar_width, 1.0)
+                )
+
+        # Only the two ends are labelled; 30 dates would not fit and the
+        # tooltip already answers "which day is this?".
+        def draw_axis_label(text_value: str, anchor: str) -> None:
+            text = NSString.stringWithString_(text_value)
+            size = text.sizeWithAttributes_(label_attributes)
+            if anchor == "right":
+                x = bounds.size.width - size.width
+            elif anchor == "center":
+                x = (bounds.size.width - size.width) / 2
+            else:
+                x = 0.0
             text.drawAtPoint_withAttributes_(
-                NSMakePoint(
-                    slot_x + (slot_width - text_size.width) / 2,
-                    chart_top + chart_height + 3.0,
-                ),
-                label_attributes,
+                NSMakePoint(x, baseline + 3.0), label_attributes
             )
+
+        if last_index > 0:
+            draw_axis_label(f"{points[0].day:%-m/%-d}", "left")
+            draw_axis_label("今天", "right")
+        else:
+            # 只有一天数据时柱子是居中的，标签跟着居中才对得上。
+            draw_axis_label("今天", "center")
 
 
 def _make_label(
@@ -1207,36 +1278,64 @@ class QuotaMenuBarApp(NSObject):
             layout.add(_make_label("Token 日志不可用", 11, NSFontWeightRegular, MUTED_TEXT), 16)
             return
 
-        rows = [
-            ("今天", periods.get("today")),
-            ("昨天", periods.get("yesterday")),
-            ("最近 30 天", periods.get("last30")),
-        ]
-        if not any(total and total.total_tokens > 0 for _, total in rows):
+        today = periods.get("today")
+        yesterday = periods.get("yesterday")
+        last30 = periods.get("last30")
+        totals = (today, yesterday, last30)
+        if not any(total and total.total_tokens > 0 for total in totals):
             layout.add(
                 _make_label("最近 30 天暂无用量", 11, NSFontWeightRegular, MUTED_TEXT),
                 16,
             )
             return
 
-        for label_text, total in rows:
-            count = total.total_tokens if total else 0
-            calls = total.calls if total else 0
-            label = _make_label(label_text, 11, NSFontWeightRegular, SUBTLE_TEXT)
-            value = _make_label(
-                f"{calls} 次调用  ·  {_format_token_count(count)}",
-                11,
-                NSFontWeightSemibold,
-                SECONDARY_TEXT,
-                NSTextAlignmentRight,
+        today_tokens = today.total_tokens if today else 0
+        today_calls = today.calls if today else 0
+        yesterday_tokens = yesterday.total_tokens if yesterday else 0
+        last30_tokens = last30.total_tokens if last30 else 0
+
+        # Today is the number the panel is opened for, so it gets the size;
+        # the rest of the periods drop to a single caption line of context.
+        layout.space(4)
+        hero = _make_number_label(
+            _format_token_short(today_tokens), 25, NSFontWeightBold, PRIMARY_TEXT
+        )
+        delta_text = _format_delta(today_tokens, yesterday_tokens)
+        if delta_text:
+            # Deliberately not colour-coded: more tokens is not "bad", and the
+            # warn/danger hues are reserved for the quota bars.
+            delta = _make_label(
+                delta_text, 11, NSFontWeightMedium, MUTED_TEXT, NSTextAlignmentRight
             )
             layout.add_row(
                 [
-                    (label, 0, ROW_LABEL_WIDTH, 16),
-                    (value, ROW_LABEL_WIDTH, layout.width - ROW_LABEL_WIDTH, 16),
+                    (hero, 0, layout.width * 0.5, 30),
+                    (delta, layout.width * 0.5, layout.width * 0.5, 14),
                 ],
-                18,
+                30,
             )
+        else:
+            layout.add(hero, 30)
+
+        layout.add(
+            _make_label(
+                f"今天 · {today_calls} 次调用", 11, NSFontWeightRegular, MUTED_TEXT
+            ),
+            15,
+        )
+
+        layout.space(7)
+        layout.add(
+            _make_label(
+                # 单位已由上方的小标题交代，这里不再重复 "Token"。
+                f"昨天 {_format_token_short(yesterday_tokens)}"
+                f"     最近 30 天 {_format_token_short(last30_tokens)}",
+                11,
+                NSFontWeightRegular,
+                SUBTLE_TEXT,
+            ),
+            15,
+        )
 
         daily = periods.get("daily")
         if isinstance(daily, list) and daily:
@@ -1245,17 +1344,9 @@ class QuotaMenuBarApp(NSObject):
                 point for point in daily if isinstance(point, DailyTokenUsage)
             ]
             if chart.points:
-                hint = _make_label(
-                    "← 左右滑动查看最近 30 天 →",
-                    9,
-                    NSFontWeightRegular,
-                    MUTED_TEXT,
-                    NSTextAlignmentRight,
-                )
-                layout.space(5)
-                layout.add(hint, 13)
+                layout.space(6)
                 layout.add(chart, DAILY_CHART_HEIGHT)
-                chart.showLatest()
+                chart.updateToolTips()
                 chart.startAnimation()
 
     def _layout_claude_usage(
@@ -1359,29 +1450,32 @@ class QuotaMenuBarApp(NSObject):
     def _layout_window(
         self, layout: "_Layout", label_text: str, window: dict[str, Any], remaining: int
     ) -> None:
-        """One line per window: name, inline bar, percentage — then the reset
-        time as a quieter second line."""
+        """Name and percentage share a caption line; the bar then spans the
+        full card width underneath.
+
+        Sharing one line with the bar left it about 110pt wide, which is too
+        short a track to read a few percent off. Giving the bar its own line
+        more than doubles it and matches the extra-usage meter below.
+        """
         name = _make_label(label_text, 12, NSFontWeightSemibold, SUBTLE_TEXT)
-
-        bar = _RingBar.alloc().init()
-        bar.fraction = remaining / 100.0
-        bar.bar_color = _bar_color(remaining)
-
-        percent = _make_label(
+        percent = _make_number_label(
             f"{remaining}%", 13, NSFontWeightBold, PRIMARY_TEXT, NSTextAlignmentRight
         )
-
-        bar_x = ROW_LABEL_WIDTH + ROW_BAR_GAP
-        bar_width = layout.width - ROW_PERCENT_WIDTH - ROW_BAR_GAP - bar_x
         layout.add_row(
             [
-                (name, 0, ROW_LABEL_WIDTH, 16),
-                (bar, bar_x, bar_width, ROW_BAR_HEIGHT),
+                (name, 0, layout.width - ROW_PERCENT_WIDTH, 16),
                 (percent, layout.width - ROW_PERCENT_WIDTH, ROW_PERCENT_WIDTH, 16),
             ],
             ROW_HEIGHT,
         )
-        layout.space(3)
+
+        layout.space(4)
+        bar = _RingBar.alloc().init()
+        bar.fraction = remaining / 100.0
+        bar.bar_color = _bar_color(remaining)
+        layout.add(bar, ROW_BAR_HEIGHT)
+
+        layout.space(4)
         layout.add(
             _make_label(_short_reset(window.get("resetsAt")), 11, NSFontWeightRegular, MUTED_TEXT),
             RESET_HEIGHT,
