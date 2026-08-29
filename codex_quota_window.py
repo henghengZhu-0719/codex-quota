@@ -764,7 +764,7 @@ class QuotaMenuBarApp(NSObject):
         self = objc.super(QuotaMenuBarApp, self).init()
         if self is None:
             return None
-        self.refresh_seconds = options["refresh"]
+        self.refresh_seconds = 1200
         self.timeout = options["timeout"]
         self.status_item = None
         self.popover = None
@@ -1391,7 +1391,7 @@ class QuotaMenuBarApp(NSObject):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="以 macOS 菜单栏原生 popover 显示 Codex 剩余额度")
     parser.add_argument(
-        "--refresh", type=float, default=900, help="刷新间隔秒数（默认 900，即 15 分钟）"
+        "--refresh", type=float, default=1200, help="刷新间隔秒数（默认 1200，即 20 分钟）"
     )
     parser.add_argument("--timeout", type=float, default=15, help="查询超时秒数（默认 15）")
     args = parser.parse_args()

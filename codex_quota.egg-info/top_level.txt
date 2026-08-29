@@ -1,4 +1,0 @@
-codex_quota
-codex_quota_window
-codex_usage
-token_usage

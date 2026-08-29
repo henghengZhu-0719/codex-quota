@@ -1,5 +1,9 @@
+# 打包依赖：build_macos.sh 和 build_windows.bat 都从本文件安装。
+pyinstaller>=6
+
 # 运行 CodexQuota 菜单栏应用（codex_quota_window.py）所需依赖。
 # 纯命令行的 codex_quota.py 只用标准库，无需安装任何依赖。
+# 菜单栏应用仅限 macOS，pip 在 Windows 上会跳过这条。
 pyobjc-framework-Cocoa>=10; sys_platform == "darwin"
 
 # CA 证书兜底：系统会优先使用 /etc/ssl/cert.pem，
